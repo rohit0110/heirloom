@@ -1,0 +1,14 @@
+.anchor
+.DS_Store
+target
+**/*.rs.bk
+node_modules
+test-ledger
+.yarn
+.surfpool
+
+# secrets / local state
+keeper/keeper-keypair.json
+keeper/keeper-state.json
+*-keypair.json
+test-ledger

@@ -1,0 +1,17 @@
+[package]
+name = "heirloom-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anchor-lang = "1.1.2"
+anyhow = "1"
+bincode = "1"
+clap = { version = "4", features = ["derive", "env"] }
+heirloom = { path = "../programs/heirloom", features = ["no-entrypoint"] }
+solana-client = "3"
+solana-commitment-config = "3.1.1"
+solana-sdk = "3"
+solana-system-interface = { version = "2", features = ["bincode"] }
+# TODO: add solana-sdk / solana-client / anyhow when logic lands

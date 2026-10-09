@@ -1,0 +1,64 @@
+//! Heirloom keeper (REQ11, REQ14): nonce authority + fee payer + final co-signer.
+//!
+//!   heirloom-keeper keygen            # create the keeper keypair (once)
+//!   heirloom-keeper info              # pubkey + balance
+//!   heirloom-keeper scan              # one pass
+//!   heirloom-keeper run --every 30    # loop
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use solana_sdk::signature::{write_keypair_file, Keypair, Signer};
+
+use heirloom_keeper::{config::Config, scan};
+
+#[derive(Parser)]
+struct Cli {
+    #[command(flatten)]
+    cfg: Config,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Generate a new keeper keypair at --keypair (refuses to overwrite).
+    Keygen,
+    /// Print the keeper pubkey and balance.
+    Info,
+    /// Run one scan pass.
+    Scan,
+    /// Run scan passes forever.
+    Run {
+        /// Seconds between passes.
+        #[arg(long, default_value_t = 30)]
+        every: u64,
+    },
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    match cli.cmd {
+        Cmd::Keygen => {
+            let path = cli.cfg.keypair_path();
+            if std::path::Path::new(&path).exists() {
+                anyhow::bail!("{path} already exists; refusing to overwrite");
+            }
+            let kp = Keypair::new();
+            write_keypair_file(&kp, &path).map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("keeper pubkey: {}\nwritten to {path}", kp.pubkey());
+        }
+        Cmd::Info => {
+            let keeper = cli.cfg.load_keypair()?;
+            let bal = cli.cfg.rpc().get_balance(&keeper.pubkey())?;
+            println!("keeper {}  balance {} lamports", keeper.pubkey(), bal);
+        }
+        Cmd::Scan => scan::run_scan(&cli.cfg)?,
+        Cmd::Run { every } => loop {
+            if let Err(e) = scan::run_scan(&cli.cfg) {
+                eprintln!("scan failed: {e:#}");
+            }
+            std::thread::sleep(std::time::Duration::from_secs(every));
+        },
+    }
+    Ok(())
+}

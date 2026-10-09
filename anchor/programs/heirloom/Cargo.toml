@@ -1,0 +1,42 @@
+[package]
+name = "heirloom"
+version = "0.1.0"
+description = "Created with Anchor"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "heirloom"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+anchor-debug = []
+# Localnet demo only: lowers min interval/grace to seconds. NEVER deploy to mainnet.
+short-timers = []
+custom-heap = []
+custom-panic = []
+
+
+[dependencies]
+anchor-lang = "1.1.2"
+solana-instructions-sysvar = "3.0.1"
+
+[dev-dependencies]
+litesvm = "0.10.0"
+solana-message = "3.0.1"
+solana-transaction = "3.0.2"
+solana-signer = "3.0.0"
+solana-keypair = "3.0.1"
+solana-clock = "3.2.1"
+solana-sdk-ids = "3.1.0"
+solana-account = "3"
+solana-system-interface = { version = "2.0.0", features = ["bincode"] }
+
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

@@ -1,0 +1,243 @@
+//! REQ11: scan Plan PDAs, verify, co-sign and broadcast only after the deadline.
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anchor_lang::{AccountDeserialize, Discriminator};
+use anyhow::{bail, Context, Result};
+use heirloom::{Plan, PlanStatus};
+use solana_client::{
+    rpc_client::RpcClient,
+    rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig, RpcSimulateTransactionConfig},
+    rpc_filter::{Memcmp, RpcFilterType},
+};
+use solana_account_decoder_client_types::UiAccountEncoding;
+use solana_commitment_config::CommitmentConfig;
+use solana_sdk::{
+    pubkey::Pubkey,
+    signature::{Keypair, Signer},
+    transaction::Transaction,
+};
+
+use crate::{
+    burn::burn_nonce,
+    config::Config,
+    state::{State, Tracked},
+};
+
+/// REQ23: one pass over every Plan owned by this keeper.
+pub fn run_scan(cfg: &Config) -> Result<()> {
+    let rpc = cfg.rpc();
+    let keeper = cfg.load_keypair()?;
+    let mut state = State::load(&cfg.state)?;
+    let now = chain_time(&rpc, CommitmentConfig::confirmed());
+
+    let plans = fetch_plans(&rpc, &keeper.pubkey())?;
+    println!("scan: {} plan(s) for keeper, chain time {now}", plans.len());
+
+    for (pda, plan) in &plans {
+        let key = pda.to_string();
+        // Plan re-created with a new nonce: the old one must be burned (REQ14).
+        if let Some(t) = state.plans.get(&key) {
+            if t.nonce != plan.nonce_account.to_string() {
+                burn_tracked(&rpc, &keeper, t);
+            }
+        }
+        state.plans.insert(
+            key,
+            Tracked { owner: plan.owner.to_string(), nonce: plan.nonce_account.to_string() },
+        );
+
+        if !is_due(plan, now) {
+            continue;
+        }
+        println!("plan {pda}: due, running preflight");
+        let sent = preflight(&rpc, &keeper, plan, pda)
+            .and_then(|tx| hard_guard(&rpc, pda, cfg.safety_margin).map(|_| tx))
+            .and_then(|tx| sign_and_simulate(&rpc, &keeper, tx))
+            .and_then(|tx| broadcast(&rpc, tx));
+        match sent {
+            Ok(sig) => println!("plan {pda}: sweep sent {sig}"),
+            Err(e) => eprintln!("plan {pda}: skipped: {e:#}"),
+        }
+    }
+
+    // Tracked plans that no longer exist were closed by the owner: burn their nonces.
+    let live: Vec<String> = plans.iter().map(|(p, _)| p.to_string()).collect();
+    let closed: Vec<String> = state.plans.keys().filter(|k| !live.contains(k)).cloned().collect();
+    for key in closed {
+        let t = state.plans.remove(&key).unwrap();
+        println!("plan {key}: closed, burning nonce {}", t.nonce);
+        burn_tracked(&rpc, &keeper, &t);
+    }
+
+    state.save(&cfg.state)?;
+    Ok(())
+}
+
+fn burn_tracked(rpc: &RpcClient, keeper: &Keypair, t: &Tracked) {
+    let res = (|| -> Result<()> {
+        let nonce: Pubkey = t.nonce.parse()?;
+        let owner: Pubkey = t.owner.parse()?;
+        burn_nonce(rpc, keeper, &nonce, &owner)
+    })();
+    if let Err(e) = res {
+        eprintln!("nonce burn failed for {}: {e:#}", t.nonce);
+    }
+}
+
+/// The `Clock` sysvar's unix_timestamp: exactly what the on-chain deadline gate reads.
+/// (Block time can run ahead of it, which would make the keeper think a plan is due too early.)
+fn chain_time(rpc: &RpcClient, commitment: CommitmentConfig) -> i64 {
+    rpc.get_account_with_commitment(&solana_sdk::sysvar::clock::ID, commitment)
+        .ok()
+        .and_then(|r| r.value)
+        .and_then(|a| bincode::deserialize::<solana_sdk::clock::Clock>(&a.data).ok())
+        .map(|c| c.unix_timestamp)
+        .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64)
+}
+
+/// REQ26 hard guard, run immediately before signing: re-read the Plan at *finalized*
+/// commitment and require finalized Clock >= last_checkin + interval + grace + safety margin.
+/// Finalized state cannot roll back, so a fork or stale read can never make us sign early.
+pub fn hard_guard(rpc: &RpcClient, plan_pda: &Pubkey, safety_margin: i64) -> Result<()> {
+    let fin = CommitmentConfig::finalized();
+    let acc = rpc
+        .get_account_with_commitment(plan_pda, fin)?
+        .value
+        .context("plan not visible at finalized commitment yet")?;
+    let plan = Plan::try_deserialize(&mut acc.data.as_slice())?;
+    if plan.status != PlanStatus::Active {
+        bail!("plan is not Active at finalized commitment");
+    }
+    let now = chain_time(rpc, fin);
+    let need = plan.deadline() + safety_margin;
+    if now < need {
+        bail!("hard guard: finalized clock {now} < deadline + margin {need}");
+    }
+    Ok(())
+}
+
+/// All `Plan` accounts whose `keeper` field is this keeper.
+pub fn fetch_plans(rpc: &RpcClient, keeper: &Pubkey) -> Result<Vec<(Pubkey, Plan)>> {
+    let cfg = RpcProgramAccountsConfig {
+        filters: Some(vec![
+            RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, Plan::DISCRIMINATOR)),
+            // 8 (discriminator) + owner (32) + beneficiary (32)
+            RpcFilterType::Memcmp(Memcmp::new_base58_encoded(72, &keeper.to_bytes())),
+        ]),
+        // Plan accounts are >128 bytes, so base58 (the default) is rejected.
+        account_config: RpcAccountInfoConfig {
+            encoding: Some(UiAccountEncoding::Base64),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    #[allow(deprecated)]
+    let accounts = rpc.get_program_accounts_with_config(&heirloom::id(), cfg)?;
+    accounts
+        .into_iter()
+        .map(|(pk, acc)| Ok((pk, Plan::try_deserialize(&mut acc.data.as_slice())?)))
+        .collect()
+}
+
+/// REQ06 mirror: Active and deadline reached.
+pub fn is_due(plan: &Plan, now: i64) -> bool {
+    plan.status == PlanStatus::Active && now >= plan.deadline()
+}
+
+/// Verifies the stored sweep ourselves, then returns it with the keeper signature added.
+/// A premature or malformed submission would burn the nonce (POC fragility), so be strict.
+pub fn preflight(rpc: &RpcClient, keeper: &Keypair, plan: &Plan, plan_pda: &Pubkey) -> Result<Transaction> {
+    let tx: Transaction =
+        bincode::deserialize(&plan.sweep_tx).context("sweep_tx is not a valid transaction")?;
+    let msg = &tx.message;
+
+    // Structure: fee payer = keeper, ix0 = AdvanceNonce, ix1 = heirloom heir_sweep.
+    if msg.account_keys.first() != Some(&keeper.pubkey()) {
+        bail!("fee payer is not the keeper");
+    }
+    if msg.instructions.len() != 2 {
+        bail!("expected 2 instructions, got {}", msg.instructions.len());
+    }
+    let program_of = |i: usize| msg.account_keys[msg.instructions[i].program_id_index as usize];
+    if program_of(0) != anchor_lang::system_program::ID || program_of(1) != heirloom::id() {
+        bail!("unexpected programs in sweep tx");
+    }
+    for needed in [&plan.owner, &plan.beneficiary, &plan.nonce_account, plan_pda] {
+        if !msg.account_keys.contains(needed) {
+            bail!("sweep tx does not reference {needed}");
+        }
+    }
+
+    // Nonce still valid: stored value must equal the tx blockhash and authority must be us.
+    let nonce = heirloom_client::read_nonce(rpc, &plan.nonce_account)?;
+    if nonce.authority != keeper.pubkey() {
+        bail!("nonce authority is not the keeper");
+    }
+    if nonce.blockhash != msg.recent_blockhash {
+        bail!("nonce advanced since this sweep was signed (stale copy)");
+    }
+
+    // Owner signature present and valid; the keeper slot is still empty.
+    let results = tx.verify_with_results();
+    let owner_idx = tx.message.account_keys.iter().position(|k| *k == plan.owner).unwrap();
+    if !results[owner_idx] {
+        bail!("owner signature missing or invalid");
+    }
+
+    Ok(tx)
+}
+
+/// REQ24: add the keeper signature, then dry-run. Failing here avoids burning the nonce on-chain.
+fn sign_and_simulate(rpc: &RpcClient, keeper: &Keypair, mut tx: Transaction) -> Result<Transaction> {
+    tx.partial_sign(&[keeper], tx.message.recent_blockhash);
+    let sim = rpc.simulate_transaction_with_config(
+        &tx,
+        RpcSimulateTransactionConfig {
+            sig_verify: true,
+            // Same commitment as the Clock read in `chain_time`; the default (finalized) lags ~12s.
+            commitment: Some(CommitmentConfig::confirmed()),
+            ..Default::default()
+        },
+    )?;
+    if let Some(err) = sim.value.err {
+        bail!("simulation failed: {err:?} logs={:?}", sim.value.logs);
+    }
+    Ok(tx)
+}
+
+fn broadcast(rpc: &RpcClient, tx: Transaction) -> Result<solana_sdk::signature::Signature> {
+    Ok(rpc.send_and_confirm_transaction(&tx)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plan(last: i64, status: PlanStatus) -> Plan {
+        Plan {
+            owner: Pubkey::new_unique(),
+            beneficiary: Pubkey::new_unique(),
+            keeper: Pubkey::new_unique(),
+            nonce_account: Pubkey::new_unique(),
+            checkin_interval: 100,
+            grace_period: 20,
+            last_checkin: last,
+            status,
+            bump: 255,
+            sweep_tx: vec![],
+        }
+    }
+
+    #[test]
+    fn due_only_at_or_after_deadline() {
+        let p = plan(1000, PlanStatus::Active);
+        assert!(!is_due(&p, 1119));
+        assert!(is_due(&p, 1120));
+    }
+
+    #[test]
+    fn distributed_is_never_due() {
+        assert!(!is_due(&plan(0, PlanStatus::Distributed), i64::MAX));
+    }
+}

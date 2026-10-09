@@ -1,33 +1,33 @@
 # Turbin3 Capstone, Deliverable 2: Atomic Requirements & Architecture Diagram
 
 **Project:** Heirloom, non-custodial digital succession for Solana wallets.
-**Team:** [TEAM NAME] — [member 1], [member 2], [member 3]
-
-> **Drafting status.** Sections 1–3 are built from the LOI v2 use cases (`deliverable-1-loi-v2.md`), the POC findings, and the 2026-09-29 execution-mechanism notes (`execution-mechanism-notes.md`). Section 4 (AI red team) is a *draft critique* for the team to accept or reject, marked `[DECIDE]` where a human verdict is still needed. Per-member reflections are submitted separately.
+**Team:** Heirloom —  Rohit Rathore. Josh Sandhu
 
 ---
 
 # 1. Scope: Capstone Idea & MVP Use Cases
 
-## 1.1 The idea (agreed capstone scope)
+## 1.1 The idea
 
 Heirloom lets a Solana owner name a beneficiary and a check-in interval. While the owner is alive, **all assets stay in the owner's own wallet** (no vault, no escrow, no shared keypair). If the owner stops checking in, the owner's *pre-authorized* sweep can be completed and broadcast, moving the live SOL balance to the beneficiary.
 
-## 1.2 Core mechanism (carried over from the POC and the execution notes)
+## 1.2 Core mechanism
 
 - The owner signs, once per check-in cycle, a durable-nonce transaction `[AdvanceNonceAccount, heir_sweep(beneficiary)]`. `heir_sweep` has **no amount argument**; it reads the owner's live lamports at execution time (POC-confirmed).
 - **Problem found in the POC:** anyone holding a fully signed copy can submit it early; the failed attempt still advances the nonce and permanently burns the only copy.
 - **Adopted fix:** the Heirloom keeper is the nonce authority *and* fee payer, so the transaction is **structurally incomplete** (missing the keeper signature) until the deadline passes. Solana rejects a transaction with a missing signature before any instruction runs, so the nonce can't be burned by a premature replay. The owner-signed partial transaction is safe to store anywhere.
 
-## 1.3 MVP use cases (3, each = 1 state transition = 1 Anchor instruction)
+## 1.3 MVP use cases (5, each = 1 state transition = 1 Anchor instruction)
 
-Roadmap items deliberately *out* of MVP: SPL-token distribution, multi-beneficiary splits, `update_beneficiaries`, `close_plan`, staged warning instructions, protocol pause/admin config, ZK/privacy, post-trigger market positions. The grace period is folded into the plan as a field (`grace_period`) rather than a separate instruction.
+Roadmap items deliberately *out* of MVP: SPL-token distribution, multi-beneficiary splits, in-place beneficiary change (to change heir in MVP: `close_plan` then `initialize_plan`), staged warning instructions, protocol pause/admin config, ZK/privacy, post-trigger market positions. The grace period is folded into the plan as a field (`grace_period`) rather than a separate instruction, and is adjustable through `update_plan` (UC5).
 
 | ID | Use case | Handler | Signer | Atomic state transition |
 |----|----------|---------|--------|--------------------------|
 | UC1 | Owner creates a succession plan | `initialize_plan` | Owner | No account → `Plan` PDA (owner, beneficiary, keeper, nonce account, interval, grace, `last_checkin = now`, status Active) |
 | UC2 | Owner proves liveness | `check_in` | Owner | `plan.last_checkin = Clock now` |
 | UC3 | Sweep live SOL to beneficiary after deadline | `heir_sweep` | Owner (presigned earlier) + Keeper (withheld until deadline) | Owner lamports → beneficiary; `plan.status = Distributed` |
+| UC4 | Owner cancels the plan and removes the heir | `close_plan` | Owner | `Plan` PDA → closed (rent returned to owner); stored `sweep_tx` is deleted with it. Keeper then burns the nonce (REQ14) |
+| UC5 | Owner updates the check-in period | `update_plan` | Owner | `plan.checkin_interval` / `plan.grace_period` replaced, `last_checkin = now` (timer reset), `sweep_tx` overwritten with a freshly signed partial sweep |
 
 *Variant covered by UC1–UC3 with no extra instruction:* "transfer to my own secondary failsafe wallet" is simply `beneficiary = owner's other wallet`.
 
@@ -43,6 +43,8 @@ Roadmap items deliberately *out* of MVP: SPL-token distribution, multi-beneficia
 | 5. At the deadline, the protocol executes the transfer | UC3 `heir_sweep` | In MVP |
 | 6. Protocol checks daily which stored instructions are due | Keeper scan (REQ11). Off-chain, not a handler | In MVP (off-chain) |
 | Extend: multiple wallets, ZK/ephemeral privacy, buying market positions on trigger | Not in MVP | Roadmap |
+| 7. User can cancel the plan and remove the heir after it has been set | UC4 `close_plan`. Closing the `Plan` PDA deletes the stored `sweep_tx`, so nothing remains in storage. The keeper finds no plan and stops tracking it. The keeper then advances and withdraws the nonce account (REQ14), so any stale copy of the bytes can never be valid, regardless of program state (REQ12) | In MVP |
+| 8. User can change the check-in / signing period after setup, and the timer resets so the new period starts fresh | UC5 `update_plan` replaces interval and grace, sets `last_checkin = now`, and overwrites `sweep_tx` with a new owner-signed partial sweep (REQ13) | In MVP |
 
 Your noted problem (nonce burned by other parties) is the exact risk the withheld keeper signature addresses.
 
@@ -50,7 +52,7 @@ Your noted problem (nonce burned by other parties) is the exact risk the withhel
 
 | Category | Actor | Role in MVP | Signs |
 |----------|-------|-------------|-------|
-| Direct | **Owner** | Creates plan, checks in, presigns the sweep each cycle | UC1, UC2, and (earlier, offline) the owner half of UC3 |
+| Direct | **Owner** | Creates, updates and cancels the plan, checks in, presigns the sweep each cycle | UC1, UC2, UC4, UC5, and (earlier, offline) the owner half of UC3 |
 | Direct | **Keeper** (Heirloom relay) | Reads the stored half-signed sweep from the `Plan` PDA, watches deadline, adds final signature and broadcasts | UC3 (co-signer + fee payer + nonce authority) |
 | Beneficiary | **Beneficiary** | Receives SOL passively | Nothing |
 | Administrator | *(none on-chain in MVP)* | `ProtocolConfig`/admin pause deferred to roadmap | — |
@@ -60,7 +62,6 @@ Your noted problem (nonce burned by other parties) is the exact risk the withhel
 
 # 2. Granularity Self-Check (team's own pass, before AI)
 
-> **Note:** your notes contain the user stories, problems and extensions, but not a written four-rule check. The table below is my first draft derived from them. Edit it so it reflects your own reasoning before adding the AI pass.
 
 | Rule | UC1 `initialize_plan` | UC2 `check_in` | UC3 `heir_sweep` |
 |------|----------------------|----------------|------------------|
@@ -69,10 +70,12 @@ Your noted problem (nonce burned by other parties) is the exact risk the withhel
 | **3. Real signers** | Pass. Owner signs. | Pass. Owner signs. | Pass **with caveat**: signers are explicit — owner (signed weeks earlier, offline), keeper (signs at execution). The keeper is a *named, on-record* signer, not a hidden backend; its key is stored in `plan.keeper`. |
 | **4. On-chain vs client** | On-chain: PDA creation, validation. Client: nonce account creation, UI. | On-chain: timestamp write. Client: build and sign the fresh partial sweep before sending, reminders. | On-chain: deadline gate, beneficiary check, transfer, status. Client/off-chain: deadline polling and pre-flight simulation. |
 
+**UC4 `close_plan` and UC5 `update_plan`:** both pass all four rules. Each is one handler and one state transition on the `Plan` PDA (close it / rewrite its schedule and `sweep_tx`), owner is the only signer, and signing the replacement partial sweep is client-side. `update_plan` deliberately overlaps with `check_in` (both reset `last_checkin` and overwrite `sweep_tx`) but is kept separate because it also changes `interval` and `grace`, which `check_in` must never do.
+
 **Open issues found in our own pass:**
 1. The half-signed transaction is stored on-chain in the `Plan` PDA, unencrypted, because the withheld keeper signature makes the bytes useless to anyone but the keeper. Trade-offs: the PDA needs space for a transaction (max 1,232 bytes) and the bytes are public. Neither blocks the MVP. `initialize_plan` and `check_in` both take the bytes as an argument, so state ownership stays on-chain.
 2. Keeper is a single point of liveness and its key has protocol-wide blast radius (execution notes §5). HSM/KMS and N-of-M signer set are post-MVP.
-3. Fixed amount with max-failover (original user story 2) is **not** in MVP; sweep is live balance only.
+3. Fixed amount with max-failover is **not** in MVP; sweep is live balance only.
 4. Nonce authority held by the keeper means the keeper could advance/close the nonce and withhold (DoS), but **cannot redirect funds**, because the beneficiary is inside the owner's signed message and re-checked against `plan.beneficiary`.
 
 ---
@@ -93,13 +96,16 @@ Your noted problem (nonce burned by other parties) is the exact risk the withhel
 | **REQ08** | Replay guard: `status == Active` required; set `Distributed` after transfer | Constraint | UC3 |
 | **REQ09** | CPI `system_program::transfer(owner → beneficiary, owner.lamports())` using the owner's presigned signature | CPI | UC3 |
 | **REQ10** | Owner builds and signs a fresh partial `[AdvanceNonceAccount, heir_sweep]` (keeper signature withheld) and passes it as an argument to `initialize_plan` / `check_in`, which overwrite `plan.sweep_tx` | Instruction arg + client | UC1, UC2, UC3 |
-| **REQ11** | Off-chain: keeper scans `Plan` PDAs daily, reads `sweep_tx`, verifies state itself, completes signature and broadcasts only after the deadline | Keeper | UC3 |
+| **REQ11** | Off-chain: keeper scans `Plan` PDAs daily, reads `sweep_tx`, verifies state itself, completes signature and broadcasts only after the deadline. A plan that no longer exists (REQ12) triggers the REQ14 nonce burn, then is dropped from the scan, and the keeper re-reads interval/grace each scan so REQ13 changes apply | Keeper | UC3 |
+| **REQ12** | `close_plan`: only `plan.owner` may close the `Plan` PDA (`close = owner`), in status Active or Distributed. Rent is returned to owner and `sweep_tx` is deleted with the account. Owner-only on purpose, so cancelling never depends on keeper liveness | Instruction | UC4 |
+| **REQ14** | Off-chain: on seeing a closed `Plan`, keeper submits `AdvanceNonceAccount` then `WithdrawNonceAccount` (rent to owner), permanently invalidating every previously signed sweep. Anyone can verify on-chain that the nonce account is gone | Keeper | UC4 |
+| **REQ13** | `update_plan`: only `plan.owner`, only while Active; sets new `checkin_interval` and `grace_period` (same bounds as REQ01), sets `last_checkin = Clock now`, overwrites `sweep_tx` | Instruction | UC5 |
 
 ## 3.2 Accounts and PDAs
 
 | Account | Owner program | Seeds / address | Mutable | Holds |
 |---------|---------------|-----------------|---------|-------|
-| `Plan` PDA | Heirloom | `["plan", owner_pubkey]` | UC2, UC3 | `owner`, `beneficiary`, `keeper`, `nonce_account`, `checkin_interval`, `grace_period`, `last_checkin`, `status`, `bump` |
+| `Plan` PDA | Heirloom | `["plan", owner_pubkey]` | UC2, UC3, UC5; closed by UC4 | `owner`, `beneficiary`, `keeper`, `nonce_account`, `checkin_interval`, `grace_period`, `last_checkin`, `status`, `bump` |
 | Nonce account | System Program | Keypair account (not PDA) | By keeper (authority) via `AdvanceNonceAccount` | Durable nonce value; authority = keeper |
 | Owner wallet | System Program | Owner keypair | Lamports debited in UC3 | The assets (never moved before trigger) |
 | Beneficiary wallet | System Program | Beneficiary pubkey | Lamports credited in UC3 | — |
@@ -113,22 +119,20 @@ Your noted problem (nonce burned by other parties) is the exact risk the withhel
 | `initialize_plan(beneficiary, keeper, nonce_account, interval, grace, sweep_tx)` | owner | owner, plan (init), nonce_account, system_program | interval/grace > 0 and within bounds; nonce authority == keeper (read via nonce account state); beneficiary != default |
 | `check_in(sweep_tx)` | owner | owner, plan (mut) | `has_one = owner`, status Active, `sweep_tx` length within the account's allocated size |
 | `heir_sweep()` | owner (presigned), keeper | owner (mut), beneficiary (mut), plan (mut), nonce_account, clock, system_program | REQ06–REQ09 |
+| `close_plan()` | owner | owner (mut), plan (mut, `close = owner`) | `has_one = owner`; status Active or Distributed |
+| `update_plan(interval, grace, sweep_tx)` | owner | owner, plan (mut) | `has_one = owner`, status Active, interval/grace > 0 and within bounds, `sweep_tx` length within allocated size |
 
 ## 3.4 CPI dependencies
 
 - **System Program `transfer`** (from `heir_sweep`), signed by the owner's presigned signature; not a PDA signer.
 - **System Program `AdvanceNonceAccount`** (top-level companion instruction in the same transaction, not a CPI from our program). Must be instruction 0.
+- `close_plan` uses Anchor's `close` constraint (lamport transfer, no CPI).
 - No Token Program CPI in MVP.
-
-## 3.5 Custom program constraints / errors
-
-`NotOwner`, `DeadlineNotReached`, `AlreadyDistributed`, `WrongBeneficiary`, `WrongKeeper`, `WrongNonceAccount`, `PlanNotActive`, `InvalidInterval`.
 
 ---
 
 # 4. Adversarial Analysis (AI second pass)
 
-> Run only after Section 2. The AI acted as critic against the same four rules. **These entries are a draft** for the team to confirm; replace `[DECIDE]` with the real verdict and your reasoning. Don't submit a verdict you disagree with.
 
 | # | AI finding | Rule | Proposed verdict | Reasoning |
 |---|-----------|------|------------------|-----------|
@@ -159,6 +163,8 @@ flowchart LR
     I1["initialize_plan<br/>REQ01"]
     I2["check_in<br/>REQ02"]
     I3["heir_sweep<br/>REQ03"]
+    I4["close_plan<br/>REQ12"]
+    I5["update_plan<br/>REQ13"]
     V1{"Clock ≥ last_checkin<br/>+ interval + grace?<br/>REQ06"}
     V2{"owner / beneficiary /<br/>keeper / nonce match plan?<br/>REQ07"}
     V3{"status == Active?<br/>REQ08"}
@@ -185,6 +191,12 @@ flowchart LR
   I2 -- "write last_checkin" --> PLAN
   CLOCK -.-> I2
   OWN -- "sign partial sweep<br/>(keeper sig withheld)<br/>pass as arg REQ10" --> I2
+  OWN -- "cancel plan, remove heir" --> I4
+  I4 -- "close, deletes sweep_tx" --> PLAN
+  KEEP -- "after close: advance + withdraw nonce, rent to owner REQ14" --> NONCE
+  OWN -- "new interval/grace + fresh partial sweep, resets timer" --> I5
+  I5 -- "write interval, grace, last_checkin, sweep_tx" --> PLAN
+  CLOCK -.-> I5
   PLAN -- "5a. keeper reads sweep_tx<br/>REQ11" --> KEEP
 
 
@@ -216,6 +228,10 @@ flowchart LR
 | Owner checks in after warning period | UC2 | `last_checkin` updated; owner signs a new partial sweep and `check_in` overwrites `sweep_tx`; old copy obsolete |
 | Second sweep attempt | V3 | `AlreadyDistributed` |
 | Wrong beneficiary / nonce / keeper | V2 | Revert |
+| Owner cancels plan | UC4 | `Plan` PDA closed, `sweep_tx` deleted; keeper burns and withdraws the nonce (REQ14), so stale bytes are cryptographically dead. Until the keeper does so, they are still inert (no plan, no keeper signature) |
+| Keeper offline when owner cancels | UC4 | Cancel still succeeds. Nonce burn is delayed until keeper returns; meanwhile stale bytes cannot run. Re-initialising needs a new nonce account anyway |
+| Owner changes interval/grace | UC5 | Timer restarts from now with new period; new partial sweep replaces the old one |
+| Owner updates or closes after `Distributed` | UC4 / UC5 | `close_plan` allowed (reclaims rent); `update_plan` rejected (status != Active) |
 
 ## 5.2 External dependencies
 
@@ -230,6 +246,8 @@ System Program (nonce + transfer), Clock sysvar, Solana RPC for the keeper, keep
 | UC1 Create plan | `initialize_plan` | I1, PLAN, NONCE | REQ01, REQ04, REQ05 |
 | UC2 Check in | `check_in` | I2, PLAN | REQ02, REQ04, REQ10 |
 | UC3 Sweep | `heir_sweep` | ADV, I3, V1–V3, TRF, OW, BEN | REQ03, REQ05–REQ09, REQ11 |
+| UC4 Cancel plan | `close_plan` | I4, PLAN, KEEP, NONCE | REQ12, REQ14 |
+| UC5 Update period | `update_plan` | I5, PLAN | REQ13, REQ04, REQ10 |
 
 ---
 
