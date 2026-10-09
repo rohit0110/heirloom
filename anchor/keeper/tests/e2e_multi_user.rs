@@ -165,6 +165,7 @@ fn multi_user_flow() {
         keypair: keeper_path.to_string_lossy().into(),
         state: chain.dir.join("keeper-state.json").to_string_lossy().into(),
         safety_margin: 0,
+        expected_genesis_hash: None,
     };
 
     let (a, b, c, d) = (user(rpc, true), user(rpc, true), user(rpc, true), user(rpc, true));

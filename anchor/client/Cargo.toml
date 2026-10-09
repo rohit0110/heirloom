@@ -9,6 +9,7 @@ anchor-lang = "1.1.2"
 anyhow = "1"
 bincode = "1"
 clap = { version = "4", features = ["derive", "env"] }
+dotenvy = "0.15"
 heirloom = { path = "../programs/heirloom", features = ["no-entrypoint"] }
 solana-client = "3"
 solana-commitment-config = "3.1.1"

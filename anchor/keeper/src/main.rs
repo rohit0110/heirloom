@@ -36,6 +36,7 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    dotenvy::dotenv().ok(); // load ./.env (or a parent's) before clap reads env vars
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Keygen => {
@@ -50,7 +51,10 @@ fn main() -> Result<()> {
         Cmd::Info => {
             let keeper = cli.cfg.load_keypair()?;
             let bal = cli.cfg.rpc().get_balance(&keeper.pubkey())?;
+            let rpc = cli.cfg.rpc();
             println!("keeper {}  balance {} lamports", keeper.pubkey(), bal);
+            println!("rpc {}  genesis {}", cli.cfg.rpc, rpc.get_genesis_hash()?);
+            println!("program {}", heirloom::id());
         }
         Cmd::Scan => scan::run_scan(&cli.cfg)?,
         Cmd::Run { every } => loop {

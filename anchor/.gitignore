@@ -12,3 +12,4 @@ keeper/keeper-keypair.json
 keeper/keeper-state.json
 *-keypair.json
 test-ledger
+.env

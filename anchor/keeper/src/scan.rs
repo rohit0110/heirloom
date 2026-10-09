@@ -27,6 +27,12 @@ use crate::{
 /// REQ23: one pass over every Plan owned by this keeper.
 pub fn run_scan(cfg: &Config) -> Result<()> {
     let rpc = cfg.rpc();
+    if let Some(expected) = &cfg.expected_genesis_hash {
+        let actual = rpc.get_genesis_hash()?.to_string();
+        if &actual != expected {
+            bail!("wrong cluster: RPC genesis {actual} != expected {expected}");
+        }
+    }
     let keeper = cfg.load_keypair()?;
     let mut state = State::load(&cfg.state)?;
     let now = chain_time(&rpc, CommitmentConfig::confirmed());

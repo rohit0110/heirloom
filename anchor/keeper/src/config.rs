@@ -17,6 +17,10 @@ pub struct Config {
     /// REQ26: seconds past the deadline (on the finalized Clock) before the keeper will sign.
     #[arg(long, env = "KEEPER_SAFETY_MARGIN", default_value_t = 300, global = true)]
     pub safety_margin: i64,
+    /// Refuse to run unless the RPC's genesis hash matches. Solana's chain identity is its genesis
+    /// hash; set this per environment so a keeper can never be pointed at the wrong cluster.
+    #[arg(long, env = "KEEPER_EXPECTED_GENESIS_HASH", global = true)]
+    pub expected_genesis_hash: Option<String>,
 }
 
 impl Config {

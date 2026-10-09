@@ -59,6 +59,7 @@ fn expand(p: &str) -> String {
 }
 
 fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
     let cli = Cli::parse();
     let rpc = RpcClient::new_with_commitment(cli.rpc.clone(), CommitmentConfig::confirmed());
     let owner = read_keypair_file(expand(&cli.owner)).map_err(|e| anyhow::anyhow!("{e}"))?;

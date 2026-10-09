@@ -9,6 +9,7 @@ anchor-lang = "1.1.2"
 anyhow = "1"
 bincode = "1"
 clap = { version = "4", features = ["derive", "env"] }
+dotenvy = "0.15"
 heirloom = { path = "../programs/heirloom", features = ["no-entrypoint"] }
 heirloom-client = { version = "0.1.0", path = "../client" }
 serde = { version = "1", features = ["derive"] }

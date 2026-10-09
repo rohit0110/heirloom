@@ -1,108 +1,175 @@
 # Heirloom: Anchor workspace
 
-Non-custodial digital succession for Solana wallets. See `../deliverable-2-requirements-architecture.md` for the requirements (REQxx) and use cases (UCx) referenced throughout the code.
+Non-custodial digital succession for Solana wallets. The owner keeps all assets in their own wallet and pre-signs a sweep to a beneficiary; if the owner stops checking in, the Heirloom keeper co-signs and broadcasts it after the deadline.
 
-**Status:** on-chain program, owner client/CLI and keeper are implemented and verified end to end on a local validator (create plan, sweep after the deadline, cancel plus nonce burn). Not deployed to devnet or mainnet.
+Requirements (REQ01-REQ26) and use cases (UC1-UC5) are defined in `../Heirloom-Deliverable-2-Architecture-and-Requirements.pdf` and referenced throughout the code and tests.
 
-## Layout
+**Status:** the on-chain program, owner client/CLI and keeper are implemented and verified end to end on a local validator (multi-user create / check-in / sweep / cancel). **Not deployed to devnet or mainnet, not audited.**
+
+---
+
+## 1. Components
 
 ```
 anchor/
 ├── Anchor.toml
-├── programs/heirloom/        # on-chain program (Anchor 1.1, litesvm tests)
-│   ├── src/
-│   │   ├── lib.rs            # 5 entrypoints: initialize_plan, check_in, heir_sweep, close_plan, update_plan
-│   │   ├── state.rs          # Plan PDA, PlanStatus      (REQ04)
-│   │   ├── error.rs          # HeirloomError
-│   │   ├── constants.rs      # seeds, bounds
-│   │   └── instructions/     # one file per use case (UC1-UC5)
-│   └── tests/plan_lifecycle.rs   # ignored placeholders, one per UC
-├── client/                   # owner-side helpers: nonce creation, partial sweep signing (REQ05, REQ10)
-└── keeper/                   # off-chain keeper: scan, preflight, co-sign, broadcast, nonce burn (REQ11, REQ14)
+├── .env.example              # config template for keeper + client (copy to .env)
+├── programs/heirloom/        # ON-CHAIN: Anchor program (5 instructions)
+│   ├── src/{lib,state,error,constants}.rs, instructions/*.rs
+│   └── tests/plan_lifecycle.rs     # LiteSVM tests, one+ per on-chain REQ
+├── client/                   # OWNER SIDE: lib + `heirloom-client` CLI
+│                             #   nonce creation (REQ21), partial-sweep signing (REQ22), UC1/2/4/5
+├── keeper/                   # BACKEND: lib + `heirloom-keeper` binary
+│   ├── src/{scan,burn,state,config}.rs
+│   └── tests/e2e_multi_user.rs     # real-validator, multi-user end-to-end
+└── scripts/localnet.sh       # build with short timers + start a local validator
 ```
 
-| UC | Instruction | File | REQ |
-|----|-------------|------|-----|
-| UC1 | `initialize_plan` | `instructions/initialize_plan.rs` | 01, 04, 05, 10 |
-| UC2 | `check_in` | `instructions/check_in.rs` | 02, 10 |
-| UC3 | `heir_sweep` | `instructions/heir_sweep.rs` | 03, 06-09 |
-| UC4 | `close_plan` | `instructions/close_plan.rs` | 12 (+14 in keeper) |
-| UC5 | `update_plan` | `instructions/update_plan.rs` | 13 |
+| Component | Runs where | Holds a key? | Job |
+|-----------|-----------|--------------|-----|
+| Program | Solana | no | Plan PDA state machine; enforces deadline, bindings, replay guard, nonce-at-ix-0 |
+| Owner client | owner's machine / wallet app | owner key | Creates the nonce account (authority = keeper), signs the partial sweep, creates / checks in / updates / closes the plan |
+| Keeper | a server you operate | **keeper key** | Scans plans, verifies, co-signs and broadcasts after the deadline, burns nonces after cancel |
 
-## Prerequisites
+| UC | Instruction | Handler file | REQs |
+|----|-------------|--------------|------|
+| UC1 | `initialize_plan` | `instructions/initialize_plan.rs` | 01-04, 25 |
+| UC2 | `check_in` | `instructions/check_in.rs` | 05-07 |
+| UC3 | `heir_sweep` | `instructions/heir_sweep.rs` | 08-14 |
+| UC4 | `close_plan` | `instructions/close_plan.rs` | 15 (+16 in keeper) |
+| UC5 | `update_plan` | `instructions/update_plan.rs` | 17-20 |
 
-- Rust (version pinned in `rust-toolchain.toml`)
-- Solana CLI (Agave) and Anchor CLI 1.1.x (`anchor --version`)
-- A local keypair at `~/.config/solana/id.json` (`solana-keygen new`)
+Off-chain: REQ16 (nonce burn), REQ21 (nonce creation), REQ22 (partial sweep), REQ23 (scan), REQ24 (simulate then broadcast), REQ26 (finalized hard guard).
 
-## Getting started
+## 2. Prerequisites
+
+- Rust (pinned in `rust-toolchain.toml`)
+- Solana CLI (Agave) 3.x: `solana`, `solana-test-validator`, `cargo build-sbf`
+- Anchor CLI 1.1.x
+
+## 3. Build and test
 
 ```bash
 cd anchor
-
-anchor build          # compiles program, writes target/deploy/heirloom.so and the IDL
-cargo check           # type-check the whole workspace (program, client, keeper)
-cargo test            # litesvm tests (needs anchor build first); placeholders are #[ignore]d
-
-# Optional: run against a local validator
-solana-test-validator            # separate terminal
-anchor deploy
-```
-
-## Localnet demo
-
-The program has a `short-timers` feature that lowers min interval/grace to seconds. **Localnet only, never deploy it elsewhere.**
-
-```bash
-# terminal 1: builds with short timers, starts a validator with the program preloaded
-./scripts/localnet.sh
-
-# terminal 2 (from anchor/)
-cargo run -p heirloom-keeper -- keygen                 # once; key is gitignored
-KEEPER=$(solana address -k keeper/keeper-keypair.json)
-solana airdrop 5 $KEEPER -u localhost
-solana-keygen new -o /tmp/owner.json; solana-keygen new -o /tmp/ben.json
-solana airdrop 10 $(solana address -k /tmp/owner.json) -u localhost
-export OWNER_KEYPAIR=/tmp/owner.json
-
-cargo run -p heirloom-client -- setup --keeper $KEEPER --beneficiary $(solana address -k /tmp/ben.json) --interval 8 --grace 2
-cargo run -p heirloom-client -- status
-cargo run -p heirloom-keeper -- scan        # too early: nothing happens
-sleep 11
-cargo run -p heirloom-keeper -- scan        # past deadline: keeper co-signs and sweeps
-solana balance $(solana address -k /tmp/ben.json) -u localhost
-```
-
-Other owner commands: `check-in`, `update --interval N --grace N`, `close` (then a keeper scan burns the nonce).
-`cargo run -p heirloom-keeper -- run --every 30` loops the scan.
-
-## Tests
-
-```bash
-anchor build                                   # once; the program tests load target/deploy/heirloom.so
-cargo test --workspace                         # everything below
+anchor build                 # program -> target/deploy/heirloom.so + IDL (production bounds)
+cargo test --workspace       # everything below, ~2 min (the e2e test dominates)
 ```
 
 | Test | What | Covers |
 |------|------|--------|
-| `programs/heirloom/tests/plan_lifecycle.rs` | LiteSVM, one or more tests per on-chain requirement (names carry the REQ id) | REQ01-REQ15, REQ17-REQ20, REQ25 |
-| `keeper/tests/e2e_multi_user.rs` | Real validator, real keeper + client. Owners A, B, C, D with separate beneficiaries, interleaved create / check-in / sweep / cancel; exact balance and status assertions | REQ16, REQ21-REQ24, REQ26 |
+| `programs/heirloom/tests/plan_lifecycle.rs` | LiteSVM. Test names carry the REQ id. Needs `anchor build` first (loads `target/deploy/heirloom.so`) | REQ01-REQ15, REQ17-REQ20, REQ25 |
+| `keeper/tests/e2e_multi_user.rs` | Starts its own validator, builds the program with `short-timers`, runs real keeper + client. Owners A, B, C, D with separate beneficiaries; interleaved create / check-in / sweep / cancel; exact balance and status assertions | REQ16, REQ21-REQ24, REQ26 |
 | `keeper/src/scan.rs` unit tests | deadline logic | REQ23 |
 
-The e2e test builds the program itself with `--features short-timers`, starts its own `solana-test-validator` on free ports and takes ~2 min. It skips with a message if the validator is not installed. Run only it with `cargo test -p heirloom-keeper --test e2e_multi_user -- --nocapture`.
+The e2e test skips with a message if `solana-test-validator` is not installed. Run it alone: `cargo test -p heirloom-keeper --test e2e_multi_user -- --nocapture`.
 
-Requirement ids follow the Deliverable 2 PDF (REQ01-REQ26).
+## 4. Configuration: chains, program ID, keys
 
-## Keeper
+**Solana has no chain id.** A cluster is identified by its **genesis hash** (`solana genesis-hash -u <cluster>`), and the program is identified by its **program ID**, which is compiled in (`declare_id!`). So "which chain" is two things you must keep consistent per environment:
 
-- Own keypair at `keeper/keeper-keypair.json` (gitignored). It is the nonce authority, fee payer and final co-signer for every plan that names it.
-- `keeper/keeper-state.json` (gitignored) remembers plan -> (owner, nonce) so it can burn the nonce after a plan is closed.
-- **Known gap:** the keeper only learns a plan's nonce by seeing the plan. A plan created and closed between two scans leaves its nonce account unburned (inert, but the rent is not reclaimed). Fix options: scan for orphan nonces with authority = keeper, or have the client register the nonce with the keeper.
-- **Hard guard (REQ26):** right before signing, the keeper re-reads the plan and the Clock at *finalized* commitment and refuses unless `Clock >= deadline + safety margin` (`--safety-margin`, default 300s).
-- Preflight before signing: fee payer is keeper, 2 expected instructions, nonce authority is keeper, nonce value still matches the tx (not stale), owner signature valid, plus a simulation.
+| Setting | Where it lives | Notes |
+|---------|----------------|-------|
+| Cluster endpoint | `RPC_URL` (env / `.env` / `--rpc`) | default `http://127.0.0.1:8899` |
+| Cluster identity | `KEEPER_EXPECTED_GENESIS_HASH` | the keeper refuses to run if the RPC's genesis hash differs. **Set this for every non-local deployment.** |
+| Program ID | `declare_id!` in `programs/heirloom/src/lib.rs` and `Anchor.toml` `[programs.<cluster>]` | one deployed program (and ideally one keypair) per cluster; `anchor keys sync` after changing `target/deploy/heirloom-keypair.json` |
+| Keeper key | `KEEPER_KEYPAIR` | the nonce authority, fee payer and co-signer for every plan naming it |
 
-## Notes
+Config loading order (first wins): CLI flag, real environment variable, `./.env` (or a parent directory's), built-in default. `heirloom-keeper` and `heirloom-client` both load `.env`.
 
-- This is a subfolder of the `heirloom` repo; it has no git repo of its own (`anchor init --no-git`).
-- Program ID in `declare_id!` / `Anchor.toml` is the generated dev key; run `anchor keys sync` after changing `target/deploy/heirloom-keypair.json`.
-- Production bounds in `constants.rs` (interval/grace min/max) are placeholders pending a decision.
+```bash
+cp .env.example .env     # .env is gitignored; never commit it
+```
+
+| Variable | Used by | Meaning |
+|----------|---------|---------|
+| `RPC_URL` | keeper, client | Solana JSON-RPC endpoint |
+| `KEEPER_EXPECTED_GENESIS_HASH` | keeper | cluster identity guard (recommended everywhere except localnet) |
+| `KEEPER_KEYPAIR` | keeper | path to the keeper keypair file |
+| `KEEPER_STATE` | keeper | path to the keeper's tracked-plan state file |
+| `KEEPER_SAFETY_MARGIN` | keeper | seconds past the deadline (finalized Clock) before signing, REQ26. Default 300 |
+| `OWNER_KEYPAIR` | client | owner keypair path (default `~/.config/solana/id.json`) |
+
+Cluster genesis hashes: mainnet-beta `5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d`, devnet `EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`. Localnet's changes on every `--reset`, so leave the guard off there.
+
+Not configurable at runtime (compiled in): the program ID, the interval/grace bounds, and the 1,232-byte `sweep_tx` cap. A different bound or program ID means a different build.
+
+## 5. Run on localnet (end to end)
+
+The `short-timers` cargo feature lowers the minimum interval/grace to seconds so a demo is possible. **Localnet only. Never deploy a `short-timers` build to devnet or mainnet** (it would let a plan be created with a 5-second check-in).
+
+```bash
+# terminal 1: builds with short timers and starts a validator with the program preloaded
+./scripts/localnet.sh
+
+# terminal 2 (from anchor/)
+cargo run -p heirloom-keeper -- keygen                    # once; writes keeper/keeper-keypair.json (gitignored)
+KEEPER=$(solana address -k keeper/keeper-keypair.json)
+solana airdrop 5 $KEEPER -u localhost
+
+solana-keygen new --no-bip39-passphrase -o /tmp/owner.json
+solana-keygen new --no-bip39-passphrase -o /tmp/ben.json
+solana airdrop 10 $(solana address -k /tmp/owner.json) -u localhost
+export OWNER_KEYPAIR=/tmp/owner.json
+
+# owner: create nonce (authority = keeper) + plan, interval 8s, grace 2s
+cargo run -p heirloom-client -- setup --keeper $KEEPER --beneficiary $(solana address -k /tmp/ben.json) --interval 8 --grace 2
+cargo run -p heirloom-client -- status
+
+# keeper: too early, nothing happens
+KEEPER_SAFETY_MARGIN=0 cargo run -p heirloom-keeper -- scan
+sleep 20
+# keeper: past the deadline on the FINALIZED clock (which lags ~12s on localnet), co-signs and sweeps
+KEEPER_SAFETY_MARGIN=0 cargo run -p heirloom-keeper -- scan
+# if it reports "hard guard: finalized clock ... < deadline", the finalized clock has not caught up yet: re-run the scan
+solana balance $(solana address -k /tmp/ben.json) -u localhost
+```
+
+Other owner commands: `check-in`, `update --interval N --grace N`, `close` (the next keeper scan burns the nonce and returns its rent to the owner), `status`.
+
+## 6. Running the keeper as a backend
+
+The keeper is a long-running process (or a scheduled job). It is the only component that needs to be online for the protocol to work after setup.
+
+```bash
+cargo run --release -p heirloom-keeper -- keygen     # once per environment
+cargo run --release -p heirloom-keeper -- info       # pubkey, balance, RPC genesis hash, program ID
+cargo run --release -p heirloom-keeper -- scan       # one pass (use from cron / a scheduler)
+cargo run --release -p heirloom-keeper -- run --every 3600   # or loop forever
+```
+
+Each pass (REQ23):
+1. Fetch every `Plan` account whose `keeper` field is this keeper.
+2. For plans past their deadline, run **preflight**: fee payer is the keeper; exactly `[AdvanceNonceAccount, heir_sweep]`; the tx references the plan's owner, beneficiary, nonce and PDA; nonce authority is the keeper; the nonce value still matches the signed tx (else the copy is stale); the owner signature is valid.
+3. **Hard guard (REQ26):** re-read the plan and Clock at *finalized* commitment and require `Clock >= last_checkin + interval + grace + KEEPER_SAFETY_MARGIN`.
+4. Add the keeper signature, **simulate** (REQ24), and only then broadcast.
+5. Tracked plans that no longer exist (owner cancelled) get their nonce advanced then withdrawn, rent to the owner (REQ16).
+
+Operating it:
+- **Key custody:** the keeper key is a plain file today. It has protocol-wide blast radius (it signs for every plan naming it). HSM/KMS and an N-of-M signer set are post-MVP; until then protect the file, fund it modestly, and rely on REQ26 plus on-chain checks. A compromised keeper can withhold or burn nonces (DoS) but cannot redirect funds: the beneficiary is inside the owner's signed message and re-checked on-chain.
+- **Funding:** the keeper pays all sweep and nonce-burn fees. Keep a balance and alert on low funds.
+- **State file:** `KEEPER_STATE` (`keeper-state.json`) maps plan -> (owner, nonce). Back it up and keep it on persistent storage; losing it means closed plans' nonces are no longer burned.
+- **Interval:** choose `--every` well below the smallest `grace_period` you allow, so a due plan is not left waiting long after its deadline plus margin.
+- **Production bounds:** the interval/grace min/max in `programs/heirloom/src/constants.rs` are placeholders pending a decision.
+
+**Open design question: orphan nonces.** Not solved; needs a decision before this is a protocol.
+
+An *orphan nonce* is a nonce account on-chain that belongs to no plan the keeper knows about. The keeper only learns a nonce exists by seeing a `Plan` that points at it. Setup is two steps (owner creates the nonce, then `initialize_plan`), so if an owner creates a plan and closes it between two keeper scans, or creates the nonce and never finishes `initialize_plan`, the keeper never sees it.
+
+Effect: no funds are at risk (a stale signed sweep still needs the keeper signature and the plan is gone), but the nonce is never burned (REQ16), the owner's rent stays locked in the account, and the keeper no longer knows which owner to refund. The e2e test works around this by scanning between D's create and cancel.
+
+Options to consider: (1) the client registers each nonce with the keeper at creation; (2) the keeper scans for nonce accounts with authority = keeper and no plan, burning them after a waiting period (owner unknown, so the rent refund needs a rule); (3) record the nonce's owner on-chain before the plan exists (beyond the PDF's five instructions). The keeper-creates-the-nonce variant would largely remove the problem.
+
+## 7. Deploying to devnet / mainnet (not done yet)
+
+Checklist before any non-local deployment:
+1. Build **without** `short-timers`: `anchor build`. Confirm the bounds in `constants.rs`.
+2. Generate a fresh program keypair per cluster, set `declare_id!` and `Anchor.toml`, `anchor keys sync`, rebuild.
+3. Deploy (`anchor deploy --provider.cluster devnet`); decide who holds the upgrade authority (multisig for mainnet, or revoke it).
+4. Generate a fresh keeper key for that cluster, fund it, set `RPC_URL`, `KEEPER_EXPECTED_GENESIS_HASH`, `KEEPER_KEYPAIR`, `KEEPER_STATE` in that environment's `.env`.
+5. Run owner setup against that cluster, confirm `keeper info` shows the right genesis hash and program ID.
+6. Security review of the program and of keeper key handling before real funds.
+
+## 8. Notes
+
+- This is a subfolder of the `heirloom` repo and has no git repo of its own (`anchor init --no-git`).
+- Secrets are gitignored: `.env`, `keeper/keeper-keypair.json`, `keeper/keeper-state.json`, `*-keypair.json`.
