@@ -25,7 +25,12 @@ pub mod heirloom {
         sweep_tx: Vec<u8>,
     ) -> Result<()> {
         instructions::initialize_plan::handle_initialize_plan(
-            ctx, beneficiary, keeper, interval, grace, sweep_tx,
+            ctx,
+            beneficiary,
+            keeper,
+            interval,
+            grace,
+            sweep_tx,
         )
     }
 

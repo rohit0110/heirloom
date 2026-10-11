@@ -12,7 +12,10 @@ use solana_sdk::{
 use solana_system_interface::instruction as sysix;
 
 pub fn burn_nonce(rpc: &RpcClient, keeper: &Keypair, nonce: &Pubkey, owner: &Pubkey) -> Result<()> {
-    let Some(acc) = rpc.get_account_with_commitment(nonce, rpc.commitment())?.value else {
+    let Some(acc) = rpc
+        .get_account_with_commitment(nonce, rpc.commitment())?
+        .value
+    else {
         return Ok(()); // already gone
     };
     let info = heirloom_client::parse_nonce(&acc.data)?;
@@ -21,7 +24,12 @@ pub fn burn_nonce(rpc: &RpcClient, keeper: &Keypair, nonce: &Pubkey, owner: &Pub
     }
 
     // 1. Advance (invalidates every signed copy built on the old nonce value).
-    heirloom_client::send(rpc, &[sysix::advance_nonce_account(nonce, &keeper.pubkey())], keeper, &[])?;
+    heirloom_client::send(
+        rpc,
+        &[sysix::advance_nonce_account(nonce, &keeper.pubkey())],
+        keeper,
+        &[],
+    )?;
 
     // 2. Withdrawing the full balance needs the stored nonce != current blockhash,
     //    so wait for a fresh blockhash first.
@@ -35,7 +43,12 @@ pub fn burn_nonce(rpc: &RpcClient, keeper: &Keypair, nonce: &Pubkey, owner: &Pub
     let lamports = rpc.get_balance(nonce)?;
     heirloom_client::send(
         rpc,
-        &[sysix::withdraw_nonce_account(nonce, &keeper.pubkey(), owner, lamports)],
+        &[sysix::withdraw_nonce_account(
+            nonce,
+            &keeper.pubkey(),
+            owner,
+            lamports,
+        )],
         keeper,
         &[],
     )?;

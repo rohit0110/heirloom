@@ -71,7 +71,8 @@ fn new_env() -> Env {
     let nonce = Pubkey::new_unique();
     svm.airdrop(&owner.pubkey(), 10 * SOL).unwrap();
     svm.airdrop(&keeper.pubkey(), 10 * SOL).unwrap();
-    svm.set_account(nonce, nonce_account(&keeper.pubkey())).unwrap();
+    svm.set_account(nonce, nonce_account(&keeper.pubkey()))
+        .unwrap();
     let plan = Pubkey::find_program_address(&[PLAN_SEED, owner.pubkey().as_ref()], &program_id).0;
     Env {
         svm,
@@ -105,7 +106,15 @@ fn send(
 
 // ---- instruction builders ----
 
-fn ix_init(e: &Env, ben: Pubkey, keeper: Pubkey, nonce: Pubkey, interval: i64, grace: i64, tx: Vec<u8>) -> Instruction {
+fn ix_init(
+    e: &Env,
+    ben: Pubkey,
+    keeper: Pubkey,
+    nonce: Pubkey,
+    interval: i64,
+    grace: i64,
+    tx: Vec<u8>,
+) -> Instruction {
     Instruction::new_with_bytes(
         heirloom::id(),
         &heirloom::instruction::InitializePlan {
@@ -130,7 +139,11 @@ fn ix_check_in(_e: &Env, signer: Pubkey, plan: Pubkey, tx: Vec<u8>) -> Instructi
     Instruction::new_with_bytes(
         heirloom::id(),
         &heirloom::instruction::CheckIn { sweep_tx: tx }.data(),
-        heirloom::accounts::CheckIn { owner: signer, plan }.to_account_metas(None),
+        heirloom::accounts::CheckIn {
+            owner: signer,
+            plan,
+        }
+        .to_account_metas(None),
     )
 }
 
@@ -143,7 +156,11 @@ fn ix_update(signer: Pubkey, plan: Pubkey, interval: i64, grace: i64, tx: Vec<u8
             sweep_tx: tx,
         }
         .data(),
-        heirloom::accounts::UpdatePlan { owner: signer, plan }.to_account_metas(None),
+        heirloom::accounts::UpdatePlan {
+            owner: signer,
+            plan,
+        }
+        .to_account_metas(None),
     )
 }
 
@@ -151,7 +168,11 @@ fn ix_close(signer: Pubkey, plan: Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         heirloom::id(),
         &heirloom::instruction::ClosePlan {}.data(),
-        heirloom::accounts::ClosePlan { owner: signer, plan }.to_account_metas(None),
+        heirloom::accounts::ClosePlan {
+            owner: signer,
+            plan,
+        }
+        .to_account_metas(None),
     )
 }
 
@@ -179,7 +200,15 @@ fn ix_sweep(e: &Env, beneficiary: Pubkey, keeper: Pubkey, nonce: Pubkey) -> Inst
 // ---- helpers ----
 
 fn init_ok(e: &mut Env) {
-    let ix = ix_init(e, e.beneficiary, e.keeper.pubkey(), e.nonce, INTERVAL, GRACE, sweep_bytes());
+    let ix = ix_init(
+        e,
+        e.beneficiary,
+        e.keeper.pubkey(),
+        e.nonce,
+        INTERVAL,
+        GRACE,
+        sweep_bytes(),
+    );
     send(&mut e.svm, &[ix], &e.owner.insecure_clone(), &[]).unwrap();
 }
 
@@ -193,7 +222,12 @@ fn sweep(e: &mut Env) -> Result<(), String> {
         ix_advance(e.nonce, e.keeper.pubkey()),
         ix_sweep(e, e.beneficiary, e.keeper.pubkey(), e.nonce),
     ];
-    send(&mut e.svm, &ixs, &e.keeper.insecure_clone(), &[&e.owner.insecure_clone()])
+    send(
+        &mut e.svm,
+        &ixs,
+        &e.keeper.insecure_clone(),
+        &[&e.owner.insecure_clone()],
+    )
 }
 
 fn deadline() -> i64 {
@@ -230,7 +264,12 @@ fn req02_rejects_bad_interval_and_grace() {
     for (ben, iv, gr, needle) in [
         (e.beneficiary, 0, GRACE, "InvalidSchedule"),
         (e.beneficiary, INTERVAL, 0, "InvalidSchedule"),
-        (e.beneficiary, INTERVAL + 5 * 365 * DAY, GRACE, "InvalidSchedule"),
+        (
+            e.beneficiary,
+            INTERVAL + 5 * 365 * DAY,
+            GRACE,
+            "InvalidSchedule",
+        ),
     ] {
         let ix = ix_init(&e, ben, ks, e.nonce, iv, gr, sweep_bytes());
         assert_err(send(&mut e.svm, &[ix], &owner, &[]), needle);
@@ -241,7 +280,15 @@ fn req02_rejects_bad_interval_and_grace() {
 fn req01_cannot_initialize_twice() {
     let mut e = new_env();
     init_ok(&mut e);
-    let ix = ix_init(&e, e.beneficiary, e.keeper.pubkey(), e.nonce, INTERVAL, GRACE, sweep_bytes());
+    let ix = ix_init(
+        &e,
+        e.beneficiary,
+        e.keeper.pubkey(),
+        e.nonce,
+        INTERVAL,
+        GRACE,
+        sweep_bytes(),
+    );
     assert!(send(&mut e.svm, &[ix], &e.owner.insecure_clone(), &[]).is_err());
 }
 
@@ -260,7 +307,15 @@ fn req01_req04_plan_is_program_owned_pda_and_stores_sweep_tx() {
 #[test]
 fn req04_sweep_tx_over_max_len_rejected() {
     let mut e = new_env();
-    let ix = ix_init(&e, e.beneficiary, e.keeper.pubkey(), e.nonce, INTERVAL, GRACE, vec![0u8; MAX_SWEEP_TX_LEN + 1]);
+    let ix = ix_init(
+        &e,
+        e.beneficiary,
+        e.keeper.pubkey(),
+        e.nonce,
+        INTERVAL,
+        GRACE,
+        vec![0u8; MAX_SWEEP_TX_LEN + 1],
+    );
     // Over-long args also exceed the 1232-byte tx limit; either failure is acceptable.
     let owner = e.owner.insecure_clone();
     assert!(send(&mut e.svm, &[ix], &owner, &[]).is_err());
@@ -272,17 +327,41 @@ fn req04_sweep_tx_over_max_len_rejected() {
 fn req03_nonce_authority_must_be_keeper() {
     let mut e = new_env();
     let other = Pubkey::new_unique();
-    e.svm.set_account(other, nonce_account(&Pubkey::new_unique())).unwrap();
-    let ix = ix_init(&e, e.beneficiary, e.keeper.pubkey(), other, INTERVAL, GRACE, sweep_bytes());
-    assert_err(send(&mut e.svm, &[ix], &e.owner.insecure_clone(), &[]), "BadNonceAuthority");
+    e.svm
+        .set_account(other, nonce_account(&Pubkey::new_unique()))
+        .unwrap();
+    let ix = ix_init(
+        &e,
+        e.beneficiary,
+        e.keeper.pubkey(),
+        other,
+        INTERVAL,
+        GRACE,
+        sweep_bytes(),
+    );
+    assert_err(
+        send(&mut e.svm, &[ix], &e.owner.insecure_clone(), &[]),
+        "BadNonceAuthority",
+    );
 }
 
 #[test]
 fn extra_nonce_must_be_initialized_system_account() {
     let mut e = new_env();
     let junk = Pubkey::new_unique(); // doesn't exist
-    let ix = ix_init(&e, e.beneficiary, e.keeper.pubkey(), junk, INTERVAL, GRACE, sweep_bytes());
-    assert_err(send(&mut e.svm, &[ix], &e.owner.insecure_clone(), &[]), "InvalidNonceAccount");
+    let ix = ix_init(
+        &e,
+        e.beneficiary,
+        e.keeper.pubkey(),
+        junk,
+        INTERVAL,
+        GRACE,
+        sweep_bytes(),
+    );
+    assert_err(
+        send(&mut e.svm, &[ix], &e.owner.insecure_clone(), &[]),
+        "InvalidNonceAccount",
+    );
 }
 
 // ================= REQ02 check_in =================
@@ -319,7 +398,10 @@ fn req05_check_in_rejected_when_distributed() {
     sweep(&mut e).unwrap();
     e.svm.airdrop(&e.owner.pubkey(), SOL).unwrap(); // owner was drained; needs fee funds
     let ix = ix_check_in(&e, e.owner.pubkey(), e.plan, sweep_bytes());
-    assert_err(send(&mut e.svm, &[ix], &e.owner.insecure_clone(), &[]), "PlanNotActive");
+    assert_err(
+        send(&mut e.svm, &[ix], &e.owner.insecure_clone(), &[]),
+        "PlanNotActive",
+    );
 }
 
 // ================= REQ03 heir_sweep =================
@@ -383,7 +465,12 @@ fn req09_wrong_beneficiary_reverts() {
         ix_sweep(&e, Pubkey::new_unique(), e.keeper.pubkey(), e.nonce),
     ];
     assert_err(
-        send(&mut e.svm, &ixs, &e.keeper.insecure_clone(), &[&e.owner.insecure_clone()]),
+        send(
+            &mut e.svm,
+            &ixs,
+            &e.keeper.insecure_clone(),
+            &[&e.owner.insecure_clone()],
+        ),
         "BeneficiaryMismatch",
     );
 }
@@ -400,7 +487,12 @@ fn req10_wrong_keeper_reverts() {
         ix_sweep(&e, e.beneficiary, imposter.pubkey(), e.nonce),
     ];
     assert_err(
-        send(&mut e.svm, &ixs, &imposter, &[&e.owner.insecure_clone(), &e.keeper.insecure_clone()]),
+        send(
+            &mut e.svm,
+            &ixs,
+            &imposter,
+            &[&e.owner.insecure_clone(), &e.keeper.insecure_clone()],
+        ),
         "KeeperOrNonceMismatch",
     );
 }
@@ -411,13 +503,20 @@ fn req10_wrong_nonce_reverts() {
     init_ok(&mut e);
     set_time(&mut e.svm, deadline());
     let other = Pubkey::new_unique();
-    e.svm.set_account(other, nonce_account(&e.keeper.pubkey())).unwrap();
+    e.svm
+        .set_account(other, nonce_account(&e.keeper.pubkey()))
+        .unwrap();
     let ixs = [
         ix_advance(other, e.keeper.pubkey()),
         ix_sweep(&e, e.beneficiary, e.keeper.pubkey(), other),
     ];
     assert_err(
-        send(&mut e.svm, &ixs, &e.keeper.insecure_clone(), &[&e.owner.insecure_clone()]),
+        send(
+            &mut e.svm,
+            &ixs,
+            &e.keeper.insecure_clone(),
+            &[&e.owner.insecure_clone()],
+        ),
         "KeeperOrNonceMismatch",
     );
 }
@@ -433,7 +532,13 @@ fn req09_wrong_owner_reverts() {
     let mut ix = ix_sweep(&e, e.beneficiary, e.keeper.pubkey(), e.nonce);
     ix.accounts[0].pubkey = other_owner.pubkey();
     let ixs = [ix_advance(e.nonce, e.keeper.pubkey()), ix];
-    assert!(send(&mut e.svm, &ixs, &e.keeper.insecure_clone(), &[&other_owner]).is_err());
+    assert!(send(
+        &mut e.svm,
+        &ixs,
+        &e.keeper.insecure_clone(),
+        &[&other_owner]
+    )
+    .is_err());
 }
 
 // ================= REQ08 replay guard =================
@@ -469,7 +574,12 @@ fn req11_sweep_without_advance_nonce_ix0_reverts() {
     set_time(&mut e.svm, deadline());
     let ixs = [ix_sweep(&e, e.beneficiary, e.keeper.pubkey(), e.nonce)];
     assert_err(
-        send(&mut e.svm, &ixs, &e.keeper.insecure_clone(), &[&e.owner.insecure_clone()]),
+        send(
+            &mut e.svm,
+            &ixs,
+            &e.keeper.insecure_clone(),
+            &[&e.owner.insecure_clone()],
+        ),
         "MissingNonceAdvance",
     );
 }
@@ -510,7 +620,13 @@ fn req15_only_owner_can_close() {
     init_ok(&mut e);
     let stranger = Keypair::new();
     e.svm.airdrop(&stranger.pubkey(), SOL).unwrap();
-    assert!(send(&mut e.svm, &[ix_close(stranger.pubkey(), e.plan)], &stranger, &[]).is_err());
+    assert!(send(
+        &mut e.svm,
+        &[ix_close(stranger.pubkey(), e.plan)],
+        &stranger,
+        &[]
+    )
+    .is_err());
     assert!(e.svm.get_account(&e.plan).is_some());
 }
 
@@ -589,18 +705,31 @@ fn req17_only_owner_can_update() {
 
 // ================= REQ14 keeper nonce burn (off-chain) =================
 
-
 #[test]
 fn extra_rejects_default_beneficiary() {
     let mut e = new_env();
-    let ix = ix_init(&e, Pubkey::default(), e.keeper.pubkey(), e.nonce, INTERVAL, GRACE, sweep_bytes());
-    assert_err(send(&mut e.svm, &[ix], &e.owner.insecure_clone(), &[]), "InvalidBeneficiary");
+    let ix = ix_init(
+        &e,
+        Pubkey::default(),
+        e.keeper.pubkey(),
+        e.nonce,
+        INTERVAL,
+        GRACE,
+        sweep_bytes(),
+    );
+    assert_err(
+        send(&mut e.svm, &[ix], &e.owner.insecure_clone(), &[]),
+        "InvalidBeneficiary",
+    );
 }
 
 #[test]
 fn req25_plan_account_size_matches_layout() {
     // 8 discriminator + 4*32 pubkeys + 3*8 i64 + status + bump + (4 + 1232) sweep_tx
-    assert_eq!(8 + <heirloom::Plan as anchor_lang::Space>::INIT_SPACE, 8 + 128 + 24 + 1 + 1 + 4 + MAX_SWEEP_TX_LEN);
+    assert_eq!(
+        8 + <heirloom::Plan as anchor_lang::Space>::INIT_SPACE,
+        8 + 128 + 24 + 1 + 1 + 4 + MAX_SWEEP_TX_LEN
+    );
 }
 
 // REQ16, REQ21, REQ22, REQ23, REQ24, REQ26 are off-chain: see keeper/tests/e2e_multi_user.rs.

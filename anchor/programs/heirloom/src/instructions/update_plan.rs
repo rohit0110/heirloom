@@ -26,7 +26,10 @@ pub fn handle_update_plan(
     sweep_tx: Vec<u8>,
 ) -> Result<()> {
     let plan = &mut ctx.accounts.plan;
-    require!(plan.status == PlanStatus::Active, HeirloomError::PlanNotActive);
+    require!(
+        plan.status == PlanStatus::Active,
+        HeirloomError::PlanNotActive
+    );
     Plan::validate_schedule(interval, grace)?;
     Plan::validate_sweep_tx(&sweep_tx)?;
     plan.checkin_interval = interval;
