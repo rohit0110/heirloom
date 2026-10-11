@@ -5,12 +5,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anchor_lang::{AccountDeserialize, Discriminator};
 use anyhow::{bail, Context, Result};
 use heirloom::{Plan, PlanStatus};
+use solana_account_decoder_client_types::UiAccountEncoding;
 use solana_client::{
     rpc_client::RpcClient,
     rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig, RpcSimulateTransactionConfig},
     rpc_filter::{Memcmp, RpcFilterType},
 };
-use solana_account_decoder_client_types::UiAccountEncoding;
 use solana_commitment_config::CommitmentConfig;
 use solana_sdk::{
     pubkey::Pubkey,
@@ -50,7 +50,10 @@ pub fn run_scan(cfg: &Config) -> Result<()> {
         }
         state.plans.insert(
             key,
-            Tracked { owner: plan.owner.to_string(), nonce: plan.nonce_account.to_string() },
+            Tracked {
+                owner: plan.owner.to_string(),
+                nonce: plan.nonce_account.to_string(),
+            },
         );
 
         if !is_due(plan, now) {
@@ -69,7 +72,12 @@ pub fn run_scan(cfg: &Config) -> Result<()> {
 
     // Tracked plans that no longer exist were closed by the owner: burn their nonces.
     let live: Vec<String> = plans.iter().map(|(p, _)| p.to_string()).collect();
-    let closed: Vec<String> = state.plans.keys().filter(|k| !live.contains(k)).cloned().collect();
+    let closed: Vec<String> = state
+        .plans
+        .keys()
+        .filter(|k| !live.contains(k))
+        .cloned()
+        .collect();
     for key in closed {
         let t = state.plans.remove(&key).unwrap();
         println!("plan {key}: closed, burning nonce {}", t.nonce);
@@ -99,7 +107,12 @@ fn chain_time(rpc: &RpcClient, commitment: CommitmentConfig) -> i64 {
         .and_then(|r| r.value)
         .and_then(|a| bincode::deserialize::<solana_sdk::clock::Clock>(&a.data).ok())
         .map(|c| c.unix_timestamp)
-        .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64)
+        .unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+        })
 }
 
 /// REQ26 hard guard, run immediately before signing: re-read the Plan at *finalized*
@@ -153,7 +166,12 @@ pub fn is_due(plan: &Plan, now: i64) -> bool {
 
 /// Verifies the stored sweep ourselves, then returns it with the keeper signature added.
 /// A premature or malformed submission would burn the nonce (POC fragility), so be strict.
-pub fn preflight(rpc: &RpcClient, keeper: &Keypair, plan: &Plan, plan_pda: &Pubkey) -> Result<Transaction> {
+pub fn preflight(
+    rpc: &RpcClient,
+    keeper: &Keypair,
+    plan: &Plan,
+    plan_pda: &Pubkey,
+) -> Result<Transaction> {
     let tx: Transaction =
         bincode::deserialize(&plan.sweep_tx).context("sweep_tx is not a valid transaction")?;
     let msg = &tx.message;
@@ -169,7 +187,12 @@ pub fn preflight(rpc: &RpcClient, keeper: &Keypair, plan: &Plan, plan_pda: &Pubk
     if program_of(0) != anchor_lang::system_program::ID || program_of(1) != heirloom::id() {
         bail!("unexpected programs in sweep tx");
     }
-    for needed in [&plan.owner, &plan.beneficiary, &plan.nonce_account, plan_pda] {
+    for needed in [
+        &plan.owner,
+        &plan.beneficiary,
+        &plan.nonce_account,
+        plan_pda,
+    ] {
         if !msg.account_keys.contains(needed) {
             bail!("sweep tx does not reference {needed}");
         }
@@ -186,7 +209,12 @@ pub fn preflight(rpc: &RpcClient, keeper: &Keypair, plan: &Plan, plan_pda: &Pubk
 
     // Owner signature present and valid; the keeper slot is still empty.
     let results = tx.verify_with_results();
-    let owner_idx = tx.message.account_keys.iter().position(|k| *k == plan.owner).unwrap();
+    let owner_idx = tx
+        .message
+        .account_keys
+        .iter()
+        .position(|k| *k == plan.owner)
+        .unwrap();
     if !results[owner_idx] {
         bail!("owner signature missing or invalid");
     }
@@ -195,7 +223,11 @@ pub fn preflight(rpc: &RpcClient, keeper: &Keypair, plan: &Plan, plan_pda: &Pubk
 }
 
 /// REQ24: add the keeper signature, then dry-run. Failing here avoids burning the nonce on-chain.
-fn sign_and_simulate(rpc: &RpcClient, keeper: &Keypair, mut tx: Transaction) -> Result<Transaction> {
+fn sign_and_simulate(
+    rpc: &RpcClient,
+    keeper: &Keypair,
+    mut tx: Transaction,
+) -> Result<Transaction> {
     tx.partial_sign(&[keeper], tx.message.recent_blockhash);
     let sim = rpc.simulate_transaction_with_config(
         &tx,

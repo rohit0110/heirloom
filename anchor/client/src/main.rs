@@ -5,17 +5,26 @@ use clap::{Parser, Subcommand};
 use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
 use solana_sdk::{
-
     pubkey::Pubkey,
     signature::{read_keypair_file, Signer},
 };
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(long, env = "RPC_URL", default_value = "http://127.0.0.1:8899", global = true)]
+    #[arg(
+        long,
+        env = "RPC_URL",
+        default_value = "http://127.0.0.1:8899",
+        global = true
+    )]
     rpc: String,
     /// Owner keypair file (defaults to the Solana CLI wallet).
-    #[arg(long, env = "OWNER_KEYPAIR", default_value = "~/.config/solana/id.json", global = true)]
+    #[arg(
+        long,
+        env = "OWNER_KEYPAIR",
+        default_value = "~/.config/solana/id.json",
+        global = true
+    )]
     owner: String,
     #[command(subcommand)]
     cmd: Cmd,
@@ -65,11 +74,27 @@ fn main() -> Result<()> {
     let owner = read_keypair_file(expand(&cli.owner)).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     match cli.cmd {
-        Cmd::Setup { keeper, beneficiary, interval, grace } => {
+        Cmd::Setup {
+            keeper,
+            beneficiary,
+            interval,
+            grace,
+        } => {
             let nonce = heirloom_client::create_nonce_account(&rpc, &owner, &keeper)?;
             println!("nonce account: {}", nonce.pubkey());
-            heirloom_client::initialize_plan(&rpc, &owner, &beneficiary, &keeper, &nonce.pubkey(), interval, grace)?;
-            println!("plan created: {}", heirloom_client::plan_pda(&owner.pubkey()).0);
+            heirloom_client::initialize_plan(
+                &rpc,
+                &owner,
+                &beneficiary,
+                &keeper,
+                &nonce.pubkey(),
+                interval,
+                grace,
+            )?;
+            println!(
+                "plan created: {}",
+                heirloom_client::plan_pda(&owner.pubkey()).0
+            );
         }
         Cmd::CheckIn => {
             heirloom_client::check_in(&rpc, &owner)?;
@@ -89,9 +114,16 @@ fn main() -> Result<()> {
             println!("beneficiary: {}", p.beneficiary);
             println!("keeper:      {}", p.keeper);
             println!("nonce:       {}", p.nonce_account);
-            println!("interval:    {}s  grace: {}s", p.checkin_interval, p.grace_period);
+            println!(
+                "interval:    {}s  grace: {}s",
+                p.checkin_interval, p.grace_period
+            );
             println!("last_checkin {}  deadline {}", p.last_checkin, p.deadline());
-            println!("status:      {:?}  sweep_tx: {} bytes", p.status, p.sweep_tx.len());
+            println!(
+                "status:      {:?}  sweep_tx: {} bytes",
+                p.status,
+                p.sweep_tx.len()
+            );
         }
     }
     Ok(())

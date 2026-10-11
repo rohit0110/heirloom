@@ -9,7 +9,6 @@ use solana_sdk::{
     message::Message,
     pubkey::Pubkey,
     signature::{Keypair, Signer},
-
     transaction::Transaction,
 };
 use solana_system_interface::instruction as sysix;
@@ -25,16 +24,21 @@ pub struct NonceInfo {
     pub blockhash: Hash,
 }
 
-/// REQ04: `Plan` PDA, seeds ["plan", owner].
-pub fn plan_pda(owner: &Pubkey) -> (Pubkey, u8) {
-    Pubkey::find_program_address(&[heirloom::PLAN_SEED, owner.as_ref()], &heirloom::id())
-}
-
-/// Parses a System nonce account (bincode: u32 version | u32 state | authority | nonce | fee).
+/// Parses a System Program nonce account:
+/// version | state | authority | durable nonce | fee calculator.
 pub fn parse_nonce(data: &[u8]) -> Result<NonceInfo> {
-    if data.len() < 72 || u32::from_le_bytes(data[4..8].try_into()?) != 1 {
-        bail!("not an initialized nonce account");
+    if data.len() < NONCE_ACCOUNT_LEN {
+        bail!("nonce account data is too short");
     }
+
+    let version = u32::from_le_bytes(data[0..4].try_into()?);
+    let state = u32::from_le_bytes(data[4..8].try_into()?);
+
+    // Accept legacy (0) and current (1) versions; require initialized state (1).
+    if version > 1 || state != 1 {
+        bail!("not a supported initialized nonce account (version={version}, state={state})");
+    }
+
     Ok(NonceInfo {
         authority: Pubkey::try_from(&data[8..40])?,
         blockhash: Hash::new_from_array(data[40..72].try_into()?),
@@ -43,16 +47,24 @@ pub fn parse_nonce(data: &[u8]) -> Result<NonceInfo> {
 
 pub fn read_nonce(rpc: &RpcClient, nonce: &Pubkey) -> Result<NonceInfo> {
     let acc = rpc.get_account(nonce).context("fetch nonce account")?;
+
     if acc.owner != system_program::ID {
         bail!("nonce account not owned by system program");
     }
+
     parse_nonce(&acc.data)
+}
+
+/// REQ04: `Plan` PDA, seeds ["plan", owner].
+pub fn plan_pda(owner: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[heirloom::PLAN_SEED, owner.as_ref()], &heirloom::id())
 }
 
 pub fn fetch_plan(rpc: &RpcClient, owner: &Pubkey) -> Result<Plan> {
     let acc = rpc
         .get_account(&plan_pda(owner).0)
         .context("no plan for this owner")?;
+
     Ok(Plan::try_deserialize(&mut acc.data.as_slice())?)
 }
 
@@ -61,11 +73,18 @@ pub fn create_nonce_account(rpc: &RpcClient, owner: &Keypair, keeper: &Pubkey) -
     let nonce = Keypair::new();
     let rent = rpc.get_minimum_balance_for_rent_exemption(NONCE_ACCOUNT_LEN)?;
     let ixs = sysix::create_nonce_account(&owner.pubkey(), &nonce.pubkey(), keeper, rent);
+
     send(rpc, &ixs, owner, &[&nonce])?;
+
     Ok(nonce)
 }
 
-fn heir_sweep_ix(owner: &Pubkey, beneficiary: &Pubkey, keeper: &Pubkey, nonce: &Pubkey) -> Instruction {
+fn heir_sweep_ix(
+    owner: &Pubkey,
+    beneficiary: &Pubkey,
+    keeper: &Pubkey,
+    nonce: &Pubkey,
+) -> Instruction {
     Instruction::new_with_bytes(
         heirloom::id(),
         &heirloom::instruction::HeirSweep {}.data(),
@@ -82,8 +101,8 @@ fn heir_sweep_ix(owner: &Pubkey, beneficiary: &Pubkey, keeper: &Pubkey, nonce: &
     )
 }
 
-/// REQ10: `[AdvanceNonceAccount, heir_sweep]`, blockhash = durable nonce, fee payer = keeper,
-/// signed by the owner only. The keeper signature slot stays empty. Returns bincode bytes.
+/// REQ10: `[AdvanceNonceAccount, heir_sweep]`, blockhash = durable nonce,
+/// fee payer = keeper, signed by the owner only. Returns bincode bytes.
 pub fn build_partial_sweep(
     rpc: &RpcClient,
     owner: &Keypair,
@@ -92,20 +111,34 @@ pub fn build_partial_sweep(
     nonce: &Pubkey,
 ) -> Result<Vec<u8>> {
     let info = read_nonce(rpc, nonce)?;
+
     if info.authority != *keeper {
-        bail!("nonce authority {} is not the keeper {}", info.authority, keeper);
+        bail!(
+            "nonce authority {} is not the keeper {}",
+            info.authority,
+            keeper
+        );
     }
+
     let ixs = [
         sysix::advance_nonce_account(nonce, keeper),
         heir_sweep_ix(&owner.pubkey(), beneficiary, keeper, nonce),
     ];
+
     let msg = Message::new_with_blockhash(&ixs, Some(keeper), &info.blockhash);
     let mut tx = Transaction::new_unsigned(msg);
     tx.partial_sign(&[owner], info.blockhash);
+
     let bytes = bincode::serialize(&tx)?;
+
     if bytes.len() > heirloom::MAX_SWEEP_TX_LEN {
-        bail!("partial sweep is {} bytes (max {})", bytes.len(), heirloom::MAX_SWEEP_TX_LEN);
+        bail!(
+            "partial sweep is {} bytes (max {})",
+            bytes.len(),
+            heirloom::MAX_SWEEP_TX_LEN
+        );
     }
+
     Ok(bytes)
 }
 
@@ -120,6 +153,7 @@ pub fn initialize_plan(
     grace: i64,
 ) -> Result<()> {
     let sweep_tx = build_partial_sweep(rpc, owner, beneficiary, keeper, nonce)?;
+
     let ix = Instruction::new_with_bytes(
         heirloom::id(),
         &heirloom::instruction::InitializePlan {
@@ -138,18 +172,27 @@ pub fn initialize_plan(
         }
         .to_account_metas(None),
     );
+
     send(rpc, &[ix], owner, &[])
 }
 
 /// Rebuilds the partial sweep from the stored plan.
 fn fresh_sweep(rpc: &RpcClient, owner: &Keypair) -> Result<Vec<u8>> {
     let plan = fetch_plan(rpc, &owner.pubkey())?;
-    build_partial_sweep(rpc, owner, &plan.beneficiary, &plan.keeper, &plan.nonce_account)
+
+    build_partial_sweep(
+        rpc,
+        owner,
+        &plan.beneficiary,
+        &plan.keeper,
+        &plan.nonce_account,
+    )
 }
 
 /// UC2: re-sign the partial sweep and reset the timer.
 pub fn check_in(rpc: &RpcClient, owner: &Keypair) -> Result<()> {
     let sweep_tx = fresh_sweep(rpc, owner)?;
+
     let ix = Instruction::new_with_bytes(
         heirloom::id(),
         &heirloom::instruction::CheckIn { sweep_tx }.data(),
@@ -159,21 +202,29 @@ pub fn check_in(rpc: &RpcClient, owner: &Keypair) -> Result<()> {
         }
         .to_account_metas(None),
     );
+
     send(rpc, &[ix], owner, &[])
 }
 
 /// UC5.
 pub fn update_plan(rpc: &RpcClient, owner: &Keypair, interval: i64, grace: i64) -> Result<()> {
     let sweep_tx = fresh_sweep(rpc, owner)?;
+
     let ix = Instruction::new_with_bytes(
         heirloom::id(),
-        &heirloom::instruction::UpdatePlan { interval, grace, sweep_tx }.data(),
+        &heirloom::instruction::UpdatePlan {
+            interval,
+            grace,
+            sweep_tx,
+        }
+        .data(),
         heirloom::accounts::UpdatePlan {
             owner: owner.pubkey(),
             plan: plan_pda(&owner.pubkey()).0,
         }
         .to_account_metas(None),
     );
+
     send(rpc, &[ix], owner, &[])
 }
 
@@ -188,16 +239,87 @@ pub fn close_plan(rpc: &RpcClient, owner: &Keypair) -> Result<()> {
         }
         .to_account_metas(None),
     );
+
     send(rpc, &[ix], owner, &[])
 }
 
 /// Sign with `payer` (+ `extra`) and confirm.
-pub fn send(rpc: &RpcClient, ixs: &[Instruction], payer: &Keypair, extra: &[&Keypair]) -> Result<()> {
+pub fn send(
+    rpc: &RpcClient,
+    ixs: &[Instruction],
+    payer: &Keypair,
+    extra: &[&Keypair],
+) -> Result<()> {
     let blockhash = rpc.get_latest_blockhash()?;
     let mut signers: Vec<&Keypair> = vec![payer];
     signers.extend_from_slice(extra);
+
     let tx = Transaction::new_signed_with_payer(ixs, Some(&payer.pubkey()), &signers, blockhash);
+
     rpc.send_and_confirm_transaction(&tx)
         .map(|_| ())
         .map_err(|e| anyhow!("{e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_nonce_rejects_short_data() {
+        let data = vec![0u8; NONCE_ACCOUNT_LEN - 1];
+        assert!(parse_nonce(&data).is_err());
+    }
+
+    #[test]
+    fn parse_nonce_rejects_uninitialized_state() {
+        let mut data = vec![0u8; NONCE_ACCOUNT_LEN];
+        data[0..4].copy_from_slice(&0u32.to_le_bytes());
+        data[4..8].copy_from_slice(&0u32.to_le_bytes());
+
+        assert!(parse_nonce(&data).is_err());
+    }
+
+    #[test]
+    fn parse_nonce_rejects_unsupported_version() {
+        let mut data = vec![0u8; NONCE_ACCOUNT_LEN];
+        data[0..4].copy_from_slice(&99u32.to_le_bytes());
+        data[4..8].copy_from_slice(&1u32.to_le_bytes());
+
+        assert!(parse_nonce(&data).is_err());
+    }
+
+    #[test]
+    fn parse_nonce_extracts_authority_and_blockhash() {
+        let authority = Pubkey::new_unique();
+        let blockhash = Hash::new_unique();
+        let mut data = vec![0u8; NONCE_ACCOUNT_LEN];
+
+        data[0..4].copy_from_slice(&0u32.to_le_bytes());
+        data[4..8].copy_from_slice(&1u32.to_le_bytes());
+        data[8..40].copy_from_slice(authority.as_ref());
+        data[40..72].copy_from_slice(blockhash.as_ref());
+
+        let parsed = parse_nonce(&data).unwrap();
+
+        assert_eq!(parsed.authority, authority);
+        assert_eq!(parsed.blockhash, blockhash);
+    }
+
+    #[test]
+    fn parse_nonce_accepts_current_version() {
+        let authority = Pubkey::new_unique();
+        let blockhash = Hash::new_unique();
+        let mut data = vec![0u8; NONCE_ACCOUNT_LEN];
+
+        data[0..4].copy_from_slice(&1u32.to_le_bytes());
+        data[4..8].copy_from_slice(&1u32.to_le_bytes());
+        data[8..40].copy_from_slice(authority.as_ref());
+        data[40..72].copy_from_slice(blockhash.as_ref());
+
+        let parsed = parse_nonce(&data).unwrap();
+
+        assert_eq!(parsed.authority, authority);
+        assert_eq!(parsed.blockhash, blockhash);
+    }
 }

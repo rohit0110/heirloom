@@ -50,7 +50,10 @@ pub fn handle_initialize_plan(
 ) -> Result<()> {
     Plan::validate_schedule(interval, grace)?;
     Plan::validate_sweep_tx(&sweep_tx)?;
-    require!(beneficiary != Pubkey::default(), HeirloomError::InvalidBeneficiary);
+    require!(
+        beneficiary != Pubkey::default(),
+        HeirloomError::InvalidBeneficiary
+    );
 
     let nonce = ctx.accounts.nonce_account.to_account_info();
     require_keys_eq!(
