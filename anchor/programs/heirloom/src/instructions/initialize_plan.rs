@@ -35,8 +35,10 @@ fn nonce_authority(nonce: &AccountInfo) -> Result<Pubkey> {
     );
     let data = nonce.try_borrow_data()?;
     require!(data.len() >= 40, HeirloomError::InvalidNonceAccount);
+    let version = u32::from_le_bytes(data[0..4].try_into().unwrap());
     let state = u32::from_le_bytes(data[4..8].try_into().unwrap());
-    require!(state == 1, HeirloomError::InvalidNonceAccount);
+    // Legacy (0) nonces cannot validate durable transactions; require Current (1) + Initialized (1).
+    require!(version == 1 && state == 1, HeirloomError::InvalidNonceAccount);
     Ok(Pubkey::try_from(&data[8..40]).unwrap())
 }
 

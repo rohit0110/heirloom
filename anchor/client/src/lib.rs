@@ -30,11 +30,23 @@ pub fn plan_pda(owner: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[heirloom::PLAN_SEED, owner.as_ref()], &heirloom::id())
 }
 
-/// Parses a System nonce account (bincode: u32 version | u32 state | authority | nonce | fee).
+/// Parses a System Program nonce account:
+/// version | state | authority | durable nonce | fee calculator.
+///
+/// Only `Versions::Current` (1) in the `Initialized` (1) state is accepted. Legacy (0) nonces are
+/// invalid for durable transactions on Solana, so a sweep built on one could never execute.
 pub fn parse_nonce(data: &[u8]) -> Result<NonceInfo> {
-    if data.len() < 72 || u32::from_le_bytes(data[4..8].try_into()?) != 1 {
-        bail!("not an initialized nonce account");
+    if data.len() < NONCE_ACCOUNT_LEN {
+        bail!("nonce account data is too short");
     }
+
+    let version = u32::from_le_bytes(data[0..4].try_into()?);
+    let state = u32::from_le_bytes(data[4..8].try_into()?);
+
+    if version != 1 || state != 1 {
+        bail!("not a supported initialized nonce account (version={version}, state={state})");
+    }
+
     Ok(NonceInfo {
         authority: Pubkey::try_from(&data[8..40])?,
         blockhash: Hash::new_from_array(data[40..72].try_into()?),
@@ -200,4 +212,55 @@ pub fn send(rpc: &RpcClient, ixs: &[Instruction], payer: &Keypair, extra: &[&Key
     rpc.send_and_confirm_transaction(&tx)
         .map(|_| ())
         .map_err(|e| anyhow!("{e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Tests below originate from Tushar Kumar's PR #1; the legacy-version case was changed to
+    // assert rejection (legacy nonces cannot validate durable transactions).
+
+    fn nonce_data(version: u32, state: u32, authority: &Pubkey, blockhash: &Hash) -> Vec<u8> {
+        let mut data = vec![0u8; NONCE_ACCOUNT_LEN];
+        data[0..4].copy_from_slice(&version.to_le_bytes());
+        data[4..8].copy_from_slice(&state.to_le_bytes());
+        data[8..40].copy_from_slice(authority.as_ref());
+        data[40..72].copy_from_slice(blockhash.as_ref());
+        data
+    }
+
+    #[test]
+    fn parse_nonce_rejects_short_data() {
+        let data = vec![0u8; NONCE_ACCOUNT_LEN - 1];
+        assert!(parse_nonce(&data).is_err());
+    }
+
+    #[test]
+    fn parse_nonce_rejects_uninitialized_state() {
+        let data = nonce_data(1, 0, &Pubkey::new_unique(), &Hash::new_unique());
+        assert!(parse_nonce(&data).is_err());
+    }
+
+    #[test]
+    fn parse_nonce_rejects_unsupported_version() {
+        let data = nonce_data(99, 1, &Pubkey::new_unique(), &Hash::new_unique());
+        assert!(parse_nonce(&data).is_err());
+    }
+
+    #[test]
+    fn parse_nonce_rejects_legacy_version() {
+        let data = nonce_data(0, 1, &Pubkey::new_unique(), &Hash::new_unique());
+        assert!(parse_nonce(&data).is_err());
+    }
+
+    #[test]
+    fn parse_nonce_accepts_current_version() {
+        let authority = Pubkey::new_unique();
+        let blockhash = Hash::new_unique();
+        let parsed = parse_nonce(&nonce_data(1, 1, &authority, &blockhash)).unwrap();
+
+        assert_eq!(parsed.authority, authority);
+        assert_eq!(parsed.blockhash, blockhash);
+    }
 }
