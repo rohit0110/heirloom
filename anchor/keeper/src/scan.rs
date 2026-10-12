@@ -158,17 +158,7 @@ pub fn preflight(rpc: &RpcClient, keeper: &Keypair, plan: &Plan, plan_pda: &Pubk
         bincode::deserialize(&plan.sweep_tx).context("sweep_tx is not a valid transaction")?;
     let msg = &tx.message;
 
-    // Structure: fee payer = keeper, ix0 = AdvanceNonce, ix1 = heirloom heir_sweep.
-    if msg.account_keys.first() != Some(&keeper.pubkey()) {
-        bail!("fee payer is not the keeper");
-    }
-    if msg.instructions.len() != 2 {
-        bail!("expected 2 instructions, got {}", msg.instructions.len());
-    }
-    let program_of = |i: usize| msg.account_keys[msg.instructions[i].program_id_index as usize];
-    if program_of(0) != anchor_lang::system_program::ID || program_of(1) != heirloom::id() {
-        bail!("unexpected programs in sweep tx");
-    }
+    check_structure(msg, &keeper.pubkey())?;
     for needed in [&plan.owner, &plan.beneficiary, &plan.nonce_account, plan_pda] {
         if !msg.account_keys.contains(needed) {
             bail!("sweep tx does not reference {needed}");
@@ -192,6 +182,46 @@ pub fn preflight(rpc: &RpcClient, keeper: &Keypair, plan: &Plan, plan_pda: &Pubk
     }
 
     Ok(tx)
+}
+
+const COMPUTE_BUDGET_ID: Pubkey =
+    anchor_lang::prelude::pubkey!("ComputeBudget111111111111111111111111111111");
+/// System Program instruction index of `AdvanceNonceAccount`.
+const ADVANCE_NONCE_IX: u32 = 4;
+
+/// Shape of the owner-signed sweep: fee payer = keeper, instruction 0 = System `AdvanceNonceAccount`
+/// (required for a durable-nonce transaction), the last instruction = Heirloom `heir_sweep`, and
+/// only Compute Budget instructions in between. Wallets commonly add those for priority fees, and
+/// they cannot move funds, so they are allowed; anything else is rejected.
+pub fn check_structure(msg: &solana_sdk::message::Message, keeper: &Pubkey) -> Result<()> {
+    if msg.account_keys.first() != Some(keeper) {
+        bail!("fee payer is not the keeper");
+    }
+    let n = msg.instructions.len();
+    if n < 2 {
+        bail!("expected at least [AdvanceNonce, heir_sweep], got {n} instruction(s)");
+    }
+    let program_of = |i: usize| msg.account_keys[msg.instructions[i].program_id_index as usize];
+
+    let first = &msg.instructions[0];
+    let is_advance = program_of(0) == anchor_lang::system_program::ID
+        && first.data.len() >= 4
+        && u32::from_le_bytes(first.data[0..4].try_into().unwrap()) == ADVANCE_NONCE_IX;
+    if !is_advance {
+        bail!(
+            "instruction 0 is not AdvanceNonceAccount (is it {}? a wallet may have reordered the transaction)",
+            program_of(0)
+        );
+    }
+    if program_of(n - 1) != heirloom::id() {
+        bail!("last instruction is not heir_sweep");
+    }
+    for i in 1..n - 1 {
+        if program_of(i) != COMPUTE_BUDGET_ID {
+            bail!("unexpected program {} at instruction {i}", program_of(i));
+        }
+    }
+    Ok(())
 }
 
 /// REQ24: add the keeper signature, then dry-run. Failing here avoids burning the nonce on-chain.
@@ -240,6 +270,65 @@ mod tests {
         let p = plan(1000, PlanStatus::Active);
         assert!(!is_due(&p, 1119));
         assert!(is_due(&p, 1120));
+    }
+
+    mod structure {
+        use super::super::*;
+        use solana_sdk::{instruction::Instruction, message::Message};
+        use solana_system_interface::instruction as sysix;
+
+        fn sweep_ix() -> Instruction {
+            Instruction::new_with_bytes(heirloom::id(), &[0u8; 8], vec![])
+        }
+        fn budget_ix() -> Instruction {
+            Instruction::new_with_bytes(COMPUTE_BUDGET_ID, &[2, 0, 0, 0, 0], vec![])
+        }
+        fn msg(keeper: &Pubkey, ixs: &[Instruction]) -> Message {
+            Message::new(ixs, Some(keeper))
+        }
+
+        #[test]
+        fn accepts_advance_then_sweep() {
+            let (k, n) = (Pubkey::new_unique(), Pubkey::new_unique());
+            let m = msg(&k, &[sysix::advance_nonce_account(&n, &k), sweep_ix()]);
+            assert!(check_structure(&m, &k).is_ok());
+        }
+
+        #[test]
+        fn accepts_compute_budget_between() {
+            let (k, n) = (Pubkey::new_unique(), Pubkey::new_unique());
+            let m = msg(&k, &[sysix::advance_nonce_account(&n, &k), budget_ix(), budget_ix(), sweep_ix()]);
+            assert!(check_structure(&m, &k).is_ok());
+        }
+
+        #[test]
+        fn rejects_compute_budget_before_advance() {
+            // What a wallet that prepends priority-fee instructions produces: not a nonce tx.
+            let (k, n) = (Pubkey::new_unique(), Pubkey::new_unique());
+            let m = msg(&k, &[budget_ix(), budget_ix(), sysix::advance_nonce_account(&n, &k), sweep_ix()]);
+            assert!(check_structure(&m, &k).is_err());
+        }
+
+        #[test]
+        fn rejects_foreign_instruction_between() {
+            let (k, n, o) = (Pubkey::new_unique(), Pubkey::new_unique(), Pubkey::new_unique());
+            let m = msg(&k, &[sysix::advance_nonce_account(&n, &k), sysix::transfer(&k, &o, 1), sweep_ix()]);
+            assert!(check_structure(&m, &k).is_err());
+        }
+
+        #[test]
+        fn rejects_wrong_fee_payer() {
+            let (k, n, other) = (Pubkey::new_unique(), Pubkey::new_unique(), Pubkey::new_unique());
+            let m = msg(&other, &[sysix::advance_nonce_account(&n, &k), sweep_ix()]);
+            assert!(check_structure(&m, &k).is_err());
+        }
+
+        #[test]
+        fn rejects_missing_sweep() {
+            let (k, n) = (Pubkey::new_unique(), Pubkey::new_unique());
+            let m = msg(&k, &[sysix::advance_nonce_account(&n, &k), budget_ix()]);
+            assert!(check_structure(&m, &k).is_err());
+        }
     }
 
     #[test]

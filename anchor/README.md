@@ -95,7 +95,7 @@ Not configurable at runtime (compiled in): the program ID, the interval/grace bo
 
 ## 5. Run on localnet (end to end)
 
-The `short-timers` cargo feature lowers the minimum interval/grace to seconds so a demo is possible. **Localnet only. Never deploy a `short-timers` build to devnet or mainnet** (it would let a plan be created with a 5-second check-in).
+The `short-timers` cargo feature lowers the minimum interval/grace to seconds so a demo is possible. **Never deploy a `short-timers` build to mainnet** (it would let a plan be created with a 5-second check-in). A clearly labelled devnet demo build is acceptable (see section 7).
 
 ```bash
 # terminal 1: builds with short timers and starts a validator with the program preloaded
@@ -139,10 +139,23 @@ cargo run --release -p heirloom-keeper -- run --every 3600   # or loop forever
 
 Each pass (REQ23):
 1. Fetch every `Plan` account whose `keeper` field is this keeper.
-2. For plans past their deadline, run **preflight**: fee payer is the keeper; exactly `[AdvanceNonceAccount, heir_sweep]`; the tx references the plan's owner, beneficiary, nonce and PDA; nonce authority is the keeper; the nonce value still matches the signed tx (else the copy is stale); the owner signature is valid.
+2. For plans past their deadline, run **preflight**: fee payer is the keeper; `AdvanceNonceAccount` first and `heir_sweep` last, with only Compute Budget instructions between; the tx references the plan's owner, beneficiary, nonce and PDA; nonce authority is the keeper; the nonce value still matches the signed tx (else the copy is stale); the owner signature is valid.
 3. **Hard guard (REQ26):** re-read the plan and Clock at *finalized* commitment and require `Clock >= last_checkin + interval + grace + KEEPER_SAFETY_MARGIN`.
 4. Add the keeper signature, **simulate** (REQ24), and only then broadcast.
 5. Tracked plans that no longer exist (owner cancelled) get their nonce advanced then withdrawn, rent to the owner (REQ16).
+
+### In Docker (local)
+
+```bash
+cd anchor
+cp .env.example .env                 # RPC_URL, KEEPER_EXPECTED_GENESIS_HASH, KEEPER_SAFETY_MARGIN
+./scripts/docker_load_key.sh keeper/devnet-keeper-keypair.json   # one-time: key -> `keeper-secrets` volume (via stdin)
+docker compose up -d --build         # builds the keeper image, runs `heirloom-keeper run --every 5`
+docker compose logs -f keeper
+docker compose down                  # stop; keeper state persists in the `keeper-state` volume
+```
+
+The key is never in the image or build context (`.dockerignore` excludes keypairs, `.env` and state files); the container runs as a non-root user with the key volume mounted read-only. Change the scan interval with `KEEPER_SCAN_EVERY`.
 
 Operating it:
 - **Key custody:** the keeper key is a plain file today. It has protocol-wide blast radius (it signs for every plan naming it). HSM/KMS and an N-of-M signer set are post-MVP; until then protect the file, fund it modestly, and rely on REQ26 plus on-chain checks. A compromised keeper can withhold or burn nonces (DoS) but cannot redirect funds: the beneficiary is inside the owner's signed message and re-checked on-chain.
@@ -150,6 +163,8 @@ Operating it:
 - **State file:** `KEEPER_STATE` (`keeper-state.json`) maps plan -> (owner, nonce). Back it up and keep it on persistent storage; losing it means closed plans' nonces are no longer burned.
 - **Interval:** choose `--every` well below the smallest `grace_period` you allow, so a due plan is not left waiting long after its deadline plus margin.
 - **Production bounds:** the interval/grace min/max in `programs/heirloom/src/constants.rs` are placeholders pending a decision.
+
+**Open design question: plans per person.** The PDA allows one plan per wallet; nothing limits one person using many wallets. See `../frontend/NOTES.md`.
 
 **Open design question: orphan nonces.** Not solved; needs a decision before this is a protocol.
 
@@ -159,7 +174,11 @@ Effect: no funds are at risk (a stale signed sweep still needs the keeper signat
 
 Options to consider: (1) the client registers each nonce with the keeper at creation; (2) the keeper scans for nonce accounts with authority = keeper and no plan, burning them after a waiting period (owner unknown, so the rent refund needs a rule); (3) record the nonce's owner on-chain before the plan exists (beyond the PDF's five instructions). The keeper-creates-the-nonce variant would largely remove the problem.
 
-## 7. Deploying to devnet / mainnet (not done yet)
+## 7. Deploying to devnet / mainnet
+
+**Devnet (demo):** `./scripts/deploy_devnet.sh` builds, checks the deployer's balance, deploys, creates and funds a devnet keeper key, and prints the `.env` values to use. It refuses to run against any cluster whose genesis hash is not devnet's. Set `DEMO_SHORT_TIMERS=1` for a seconds-scale build so a demo can complete live; without it the minimum check-in interval is one day. A deploy needs roughly 2.3 SOL on the deployer (3.3 recommended, for upgrade headroom), plus keeper funding.
+
+**Mainnet:** not done. Checklist:
 
 Checklist before any non-local deployment:
 1. Build **without** `short-timers`: `anchor build`. Confirm the bounds in `constants.rs`.
@@ -171,5 +190,6 @@ Checklist before any non-local deployment:
 
 ## 8. Notes
 
+- Frontend: `../frontend` (single page, wallet connect + create plan + sign). See its README.
 - This is a subfolder of the `heirloom` repo and has no git repo of its own (`anchor init --no-git`).
 - Secrets are gitignored: `.env`, `keeper/keeper-keypair.json`, `keeper/keeper-state.json`, `*-keypair.json`.

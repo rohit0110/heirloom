@@ -1,0 +1,24 @@
+# Local keeper backend:   docker compose up -d --build   |   docker compose logs -f keeper
+#
+# Reads cluster settings from ./.env (RPC_URL, KEEPER_EXPECTED_GENESIS_HASH, KEEPER_SAFETY_MARGIN).
+# The keeper key lives in the `keeper-secrets` volume (load it once with
+# ./scripts/docker_load_key.sh); keeper state lives in the `keeper-state` volume.
+services:
+  keeper:
+    build: .
+    image: heirloom-keeper:local
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # container paths override whatever host paths .env contains
+      KEEPER_KEYPAIR: /secrets/keeper.json
+      KEEPER_STATE: /data/keeper-state.json
+    volumes:
+      - keeper-secrets:/secrets:ro
+      - keeper-state:/data
+    command: ["run", "--every", "${KEEPER_SCAN_EVERY:-5}"]
+
+volumes:
+  keeper-state:
+  keeper-secrets:
+    external: true

@@ -1,0 +1,85 @@
+:root {
+  --bg: #0f1115;
+  --panel: #181b22;
+  --border: #2a2f3a;
+  --text: #e8eaf0;
+  --muted: #8b93a7;
+  --accent: #7c5cff;
+  --bad: #ff6b6b;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.page { max-width: 880px; margin: 0 auto; padding: 24px 16px 64px; }
+.top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 64px; }
+.top h1 { margin: 0; font-size: 1.4rem; letter-spacing: 0.02em; }
+.hint { text-align: center; color: var(--muted); margin-top: 96px; }
+.boxes { display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; }
+.box {
+  flex: 1 1 320px;
+  max-width: 400px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.box.wide { max-width: 480px; gap: 16px; }
+label { color: var(--muted); font-size: 0.85rem; }
+input, select {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  color: var(--text);
+  font-size: 1rem;
+}
+input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.row { display: flex; gap: 8px; }
+.row input { flex: 1; }
+.row select { width: 130px; }
+small { color: var(--muted); }
+.actions, .status { display: flex; justify-content: center; margin-top: 24px; }
+button {
+  background: var(--accent);
+  color: white;
+  border: 0;
+  border-radius: 10px;
+  padding: 14px 28px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.kv { display: flex; justify-content: space-between; color: var(--muted); }
+.kv b { color: var(--text); font-family: ui-monospace, monospace; }
+.countdown { text-align: center; padding: 18px 0; display: flex; flex-direction: column; gap: 6px; }
+.countdown span { color: var(--muted); }
+.countdown strong { font-size: 2.2rem; font-variant-numeric: tabular-nums; }
+.bad { color: var(--bad); }
+.error {
+  margin: 24px auto 0;
+  max-width: 820px;
+  color: var(--bad);
+  background: rgba(255, 107, 107, 0.08);
+  border: 1px solid rgba(255, 107, 107, 0.3);
+  border-radius: 10px;
+  padding: 12px;
+  word-break: break-word;
+}
+button.link {
+  background: transparent;
+  color: var(--muted);
+  font-weight: 500;
+  padding: 6px;
+  text-decoration: underline;
+}
+.box.wide > button { align-self: center; }

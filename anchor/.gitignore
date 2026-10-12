@@ -13,3 +13,4 @@ keeper/keeper-state.json
 *-keypair.json
 test-ledger
 .env
+keeper/*-state.json

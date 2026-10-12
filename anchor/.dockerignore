@@ -1,0 +1,11 @@
+target
+test-ledger
+.git
+.env
+.env.*
+!.env.example
+# never bake keys or state into an image
+**/*-keypair.json
+**/*keypair*.json
+keeper/*-state.json
+**/node_modules
