@@ -285,6 +285,17 @@ fn extra_nonce_must_be_initialized_system_account() {
     assert_err(send(&mut e.svm, &[ix], &e.owner.insecure_clone(), &[]), "InvalidNonceAccount");
 }
 
+#[test]
+fn extra_legacy_version_nonce_rejected() {
+    let mut e = new_env();
+    let legacy = Pubkey::new_unique();
+    let mut acc = nonce_account(&e.keeper.pubkey());
+    acc.data[0..4].copy_from_slice(&0u32.to_le_bytes()); // Versions::Legacy
+    e.svm.set_account(legacy, acc).unwrap();
+    let ix = ix_init(&e, e.beneficiary, e.keeper.pubkey(), legacy, INTERVAL, GRACE, sweep_bytes());
+    assert_err(send(&mut e.svm, &[ix], &e.owner.insecure_clone(), &[]), "InvalidNonceAccount");
+}
+
 // ================= REQ02 check_in =================
 
 #[test]
